@@ -1,0 +1,831 @@
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
+import { URI } from '../../../../base/common/uri.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { ILogService } from '../../../../platform/log/common/log.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+
+import {
+	IAICompanionService,
+	IAIConversation,
+	IAIMessage,
+	IAITask,
+	IAIRequirements,
+	IAIDesign,
+	IProjectMemory,
+	AICompanionMode,
+	ConversationState,
+	MessageType
+} from './aiCompanionService.js';
+
+import { FileSystemManager } from './fileSystemManager.js';
+import { PathUtils } from './utils/pathUtils.js';
+// import { ValidationUtils } from './utils/validationUtils.js';
+import { AICompanionFiles } from './aiCompanionServiceTokens.js';
+import { IAIProvider, IAIProviderConfig } from './ai/aiProvider.js';
+import { aiProviderFactory } from './ai/aiProviderFactory.js';
+
+const PROJECT_MEMORY_SCHEMA = {
+	type: 'object',
+	properties: {
+		projectName: { type: 'string' },
+		goals: { type: 'array' },
+		stack: { type: 'array' },
+		architecture: { type: 'string' },
+		features: { type: 'array' },
+		userPreferences: { type: 'object' },
+		conversations: { type: 'array' },
+		lastUpdated: { type: 'number' }
+	},
+	required: ['projectName', 'goals', 'stack', 'lastUpdated']
+};
+
+const CONVERSATION_SCHEMA = {
+	type: 'object',
+	properties: {
+		id: { type: 'string' },
+		workspaceUri: { type: 'string' },
+		messages: { type: 'array' },
+		state: { type: 'string' },
+		mode: { type: 'string' },
+		createdAt: { type: 'number' },
+		lastModified: { type: 'number' }
+	},
+	required: ['id', 'workspaceUri', 'messages', 'state', 'mode', 'createdAt', 'lastModified']
+};
+
+export class AICompanionService extends Disposable implements IAICompanionService {
+	readonly _serviceBrand: undefined;
+
+	private readonly _onDidChangeConversation = this._register(new Emitter<IAIConversation>());
+	readonly onDidChangeConversation: Event<IAIConversation> = this._onDidChangeConversation.event;
+
+	private readonly _onDidChangeMode = this._register(new Emitter<AICompanionMode>());
+	readonly onDidChangeMode: Event<AICompanionMode> = this._onDidChangeMode.event;
+
+	private readonly _onDidChangeState = this._register(new Emitter<ConversationState>());
+	readonly onDidChangeState: Event<ConversationState> = this._onDidChangeState.event;
+
+	private readonly _onDidUpdateProjectMemory = this._register(new Emitter<IProjectMemory>());
+	readonly onDidUpdateProjectMemory: Event<IProjectMemory> = this._onDidUpdateProjectMemory.event;
+
+	private readonly workspaceService: IWorkspaceContextService;
+	private readonly fileService: IFileService;
+	private readonly logService: ILogService;
+	    // private readonly instantiationService: IInstantiationService;
+	private readonly configurationService: IConfigurationService;
+
+	private readonly fileSystemManager: FileSystemManager;
+	private readonly pathUtils: PathUtils;
+	    // private readonly validationUtils: ValidationUtils;
+
+	private _currentConversation: IAIConversation | undefined;
+	private _currentMode: AICompanionMode = AICompanionMode.Helper;
+	private _currentState: ConversationState = ConversationState.Idle;
+	private _projectMemory: IProjectMemory | undefined;
+	private _workspaceUri: URI | undefined;
+	private _isInitialized = false;
+
+	private conversations: Map<string, IAIConversation> = new Map();
+	private tasks: Map<string, IAITask[]> = new Map();
+
+	private aiProvider: IAIProvider | undefined;
+
+	constructor(
+		workspaceService: IWorkspaceContextService,
+		fileService: IFileService,
+		logService: ILogService,
+		instantiationService: IInstantiationService,
+		configurationService: IConfigurationService
+	) {
+		super();
+
+		this.workspaceService = workspaceService;
+		this.fileService = fileService;
+		this.logService = logService;
+		        // this.instantiationService = instantiationService;
+		this.configurationService = configurationService;
+
+		this.fileSystemManager = new FileSystemManager(
+			workspaceService,
+			fileService,
+			logService,
+			instantiationService
+		);
+		this.pathUtils = new PathUtils(workspaceService);
+		// this.validationUtils = new ValidationUtils(fileService);
+
+		this._register(this.fileSystemManager);
+
+		this.initializeAIProvider();
+		
+		this._register(configurationService.onDidChangeConfiguration((e: any) => {
+			if (e.affectsConfiguration('aiCompanion.ai')) {
+				this.initializeAIProvider();
+			}
+		}));
+	}
+
+	private initializeAIProvider(): void {
+		try {
+			const aiConfig = this.configurationService.getValue<IAIProviderConfig>('aiCompanion.ai');
+			
+			if (aiConfig && aiConfig.provider && aiConfig.apiKey) {
+				this.aiProvider = aiProviderFactory.createProviderWithDefaults(aiConfig.provider, aiConfig);
+				this.logService.info('AI provider initialized:', aiConfig.provider);
+			} else {
+				this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
+				this.aiProvider = undefined;
+			}
+		} catch (error: any) {
+			this.logService.error('Failed to initialize AI provider:', error);
+			this.aiProvider = undefined;
+		}
+	}
+
+	private async generateProjectContext(): Promise<any> {
+		const workspaceInfo = await this.getWorkspaceInfo();
+		const projectMemory = this._projectMemory;
+		
+		return {
+			workspace: workspaceInfo,
+			projectMemory: projectMemory,
+			currentMode: this._currentMode,
+			fileStructure: await this.getFileStructure(),
+			techStack: projectMemory?.stack || [],
+			architecture: projectMemory?.architecture || '',
+			goals: projectMemory?.goals || []
+		};
+	}
+
+	private async getFileStructure(): Promise<string[]> {
+		try {
+			const workspace = this.workspaceService.getWorkspace();
+			if (!workspace.folders.length) return [];
+
+			const rootUri = workspace.folders[0].uri;
+			const files: string[] = [];
+			
+			const scanDirectory = async (uri: URI, depth: number = 0): Promise<void> => {
+				if (depth > 3) return; // Limit depth to avoid performance issues
+				
+				try {
+					const stat = await this.fileService.resolve(uri);
+					if (stat.children) {
+						for (const child of stat.children) {
+							const relativePath = this.pathUtils.resolveProjectPath(child.resource.fsPath);
+							if (relativePath) {
+								files.push(relativePath);
+								if (child.isDirectory && depth < 3) {
+									await scanDirectory(child.resource, depth + 1);
+								}
+							}
+						}
+					}
+				} catch (error) {
+					// Ignore permission errors
+				}
+			};
+
+			await scanDirectory(rootUri);
+			return files.slice(0, 100); // Limit to 100 files
+		} catch (error) {
+			return [];
+		}
+	}
+
+	get currentConversation(): IAIConversation | undefined {
+		return this._currentConversation;
+	}
+
+	get currentMode(): AICompanionMode {
+		return this._currentMode;
+	}
+
+	get currentState(): ConversationState {
+		return this._currentState;
+	}
+
+	get projectMemory(): IProjectMemory | undefined {
+		return this._projectMemory;
+	}
+
+	async initialize(workspaceUri: URI): Promise<void> {
+		if (this._isInitialized) {
+			return;
+		}
+
+		try {
+			this._workspaceUri = workspaceUri;
+
+			await this.fileSystemManager.initialize();
+
+			await this.loadProjectMemory(workspaceUri);
+
+			await this.loadExistingConversations();
+
+			this._isInitialized = true;
+			this.logService.info('AI Companion Service initialized successfully');
+
+		} catch (error: any) {
+			this.logService.error('Failed to initialize AI Companion Service:', error);
+			throw error;
+		}
+	}
+
+	override dispose(): void {
+		super.dispose();
+		this._isInitialized = false;
+		this.conversations.clear();
+		this.tasks.clear();
+	}
+
+	async startNewConversation(mode: AICompanionMode): Promise<IAIConversation> {
+		this.ensureInitialized();
+
+		const conversation: IAIConversation = {
+			id: generateUuid(),
+			workspaceUri: this._workspaceUri!,
+			messages: [],
+			state: ConversationState.Idle,
+			mode: mode,
+			createdAt: Date.now(),
+			lastModified: Date.now()
+		};
+
+		this.conversations.set(conversation.id, conversation);
+
+		await this.saveConversation(conversation);
+
+		this._currentConversation = conversation;
+		this._currentMode = mode;
+
+		this._onDidChangeConversation.fire(conversation);
+		this._onDidChangeMode.fire(mode);
+
+		this.logService.info(`Started new ${mode} conversation: ${conversation.id}`);
+		return conversation;
+	}
+
+	async getConversation(id: string): Promise<IAIConversation | undefined> {
+		this.ensureInitialized();
+		return this.conversations.get(id);
+	}
+
+	async getAllConversations(): Promise<IAIConversation[]> {
+		this.ensureInitialized();
+		return Array.from(this.conversations.values());
+	}
+
+	async deleteConversation(id: string): Promise<void> {
+		this.ensureInitialized();
+
+		const conversation = this.conversations.get(id);
+		if (!conversation) {
+			return;
+		}
+
+		this.conversations.delete(id);
+		this.tasks.delete(id);
+
+		try {
+			const conversationFile = `${AICompanionFiles.CONVERSATION_BACKUP}.${id}.json`;
+			if (await this.fileSystemManager.fileExists(conversationFile)) {
+				await this.fileSystemManager.deleteFile(conversationFile);
+			}
+		} catch (error: any) {
+			this.logService.warn(`Failed to delete conversation file for ${id}:`, error);
+		}
+
+		if (this._currentConversation?.id === id) {
+			this._currentConversation = undefined;
+		}
+
+		this.logService.info(`Deleted conversation: ${id}`);
+	}
+
+	async setActiveConversation(id: string): Promise<void> {
+		this.ensureInitialized();
+
+		const conversation = this.conversations.get(id);
+		if (!conversation) {
+			throw new Error(`Conversation not found: ${id}`);
+		}
+
+		this._currentConversation = conversation;
+		this._currentMode = conversation.mode;
+		this.setState(conversation.state);
+
+		this._onDidChangeConversation.fire(conversation);
+		this._onDidChangeMode.fire(conversation.mode);
+	}
+
+	async sendMessage(content: string, files?: URI[]): Promise<IAIMessage> {
+		this.ensureInitialized();
+
+		if (!this._currentConversation) {
+			throw new Error('No active conversation');
+		}
+
+		const message: IAIMessage = {
+			id: generateUuid(),
+			type: MessageType.User,
+			content: content,
+			timestamp: Date.now(),
+			metadata: files ? { files: files.map(f => f.toString()) } : undefined
+		};
+
+		this._currentConversation.messages.push(message);
+		this._currentConversation.lastModified = Date.now();
+
+		this.conversations.set(this._currentConversation.id, this._currentConversation);
+
+		await this.saveConversation(this._currentConversation);
+
+		this._onDidChangeConversation.fire(this._currentConversation);
+
+		this.logService.debug(`Message sent in conversation ${this._currentConversation.id}`);
+		return message;
+	}
+
+	async getMessages(conversationId?: string): Promise<IAIMessage[]> {
+		this.ensureInitialized();
+
+		const id = conversationId || this._currentConversation?.id;
+		if (!id) {
+			return [];
+		}
+
+		const conversation = this.conversations.get(id);
+		return conversation?.messages || [];
+	}
+
+	async clearMessages(conversationId?: string): Promise<void> {
+		this.ensureInitialized();
+
+		const id = conversationId || this._currentConversation?.id;
+		if (!id) {
+			return;
+		}
+
+		const conversation = this.conversations.get(id);
+		if (conversation) {
+			conversation.messages = [];
+			conversation.lastModified = Date.now();
+			this.conversations.set(id, conversation);
+			await this.saveConversation(conversation);
+			this._onDidChangeConversation.fire(conversation);
+		}
+	}
+
+	async generateRequirements(prompt: string): Promise<IAIRequirements> {
+		this.ensureInitialized();
+		this.setState(ConversationState.GeneratingRequirements);
+
+		try {
+			if (!this.aiProvider) {
+				throw new Error('AI provider not configured. Please configure your API key in settings.');
+			}
+
+			const projectContext = await this.generateProjectContext();
+			
+			const aiResult = await this.aiProvider.generateRequirements(prompt, projectContext);
+			
+			const requirements: IAIRequirements = {
+				functional: aiResult.functional,
+				nonFunctional: aiResult.nonFunctional,
+				constraints: aiResult.constraints,
+				assumptions: aiResult.assumptions
+			};
+
+			if (this._currentConversation) {
+				const aiMessage: IAIMessage = {
+					id: generateUuid(),
+					type: MessageType.Assistant,
+					content: `Generated requirements for: ${prompt}\n\n**Reasoning:** ${aiResult.reasoning}`,
+					timestamp: Date.now(),
+					metadata: { requirements: requirements.functional }
+				};
+
+				this._currentConversation.messages.push(aiMessage);
+				await this.saveConversation(this._currentConversation);
+				this._onDidChangeConversation.fire(this._currentConversation);
+			}
+
+			this.setState(ConversationState.Idle);
+			return requirements;
+
+		} catch (error: any) {
+			this.setState(ConversationState.Idle);
+			this.logService.error('Failed to generate requirements:', error);
+			
+			if (this._currentConversation) {
+				const errorMessage: IAIMessage = {
+					id: generateUuid(),
+					type: MessageType.System,
+					content: `Error generating requirements: ${error.message}`,
+					timestamp: Date.now()
+				};
+				this._currentConversation.messages.push(errorMessage);
+				await this.saveConversation(this._currentConversation);
+				this._onDidChangeConversation.fire(this._currentConversation);
+			}
+			
+			throw error;
+		}
+	}
+
+	async generateDesign(requirements: IAIRequirements): Promise<IAIDesign> {
+		this.ensureInitialized();
+		this.setState(ConversationState.GeneratingDesign);
+
+		try {
+			if (!this.aiProvider) {
+				throw new Error('AI provider not configured');
+			}
+
+			const projectContext = await this.generateProjectContext();
+			
+			const aiRequirements = {
+				functional: requirements.functional,
+				nonFunctional: requirements.nonFunctional,
+				constraints: requirements.constraints,
+				assumptions: requirements.assumptions,
+				reasoning: ''
+			};
+
+			const aiResult = await this.aiProvider.generateDesign(aiRequirements, projectContext);
+
+			const design: IAIDesign = {
+				folderStructure: aiResult.folderStructure,
+				components: aiResult.components,
+				architecture: aiResult.architecture,
+				techStack: aiResult.techStack,
+				dependencies: aiResult.dependencies
+			};
+
+			if (this._currentConversation) {
+				const aiMessage: IAIMessage = {
+					id: generateUuid(),
+					type: MessageType.Assistant,
+					content: `Generated design based on requirements.\n\n**Architecture:** ${design.architecture}\n\n**Tech Stack:** ${design.techStack.join(', ')}\n\n**Reasoning:** ${aiResult.reasoning}`,
+					timestamp: Date.now()
+				};
+
+				this._currentConversation.messages.push(aiMessage);
+				await this.saveConversation(this._currentConversation);
+				this._onDidChangeConversation.fire(this._currentConversation);
+			}
+
+			this.setState(ConversationState.Idle);
+			return design;
+
+		} catch (error: any) {
+			this.setState(ConversationState.Idle);
+			this.logService.error('Failed to generate design:', error);
+			throw error;
+		}
+	}
+
+	async generateTasks(requirements: IAIRequirements, design: IAIDesign): Promise<IAITask[]> {
+		this.ensureInitialized();
+		this.setState(ConversationState.GeneratingTasks);
+
+		try {
+			if (!this.aiProvider) {
+				throw new Error('AI provider not configured');
+			}
+
+			const projectContext = await this.generateProjectContext();
+			
+			const aiRequirements = {
+				functional: requirements.functional,
+				nonFunctional: requirements.nonFunctional,
+				constraints: requirements.constraints,
+				assumptions: requirements.assumptions,
+				reasoning: ''
+			};
+
+			const aiDesign = {
+				folderStructure: design.folderStructure,
+				components: design.components,
+				architecture: design.architecture,
+				techStack: design.techStack,
+				dependencies: design.dependencies,
+				reasoning: ''
+			};
+
+			const aiResult = await this.aiProvider.generateTasks(aiRequirements, aiDesign, projectContext);
+
+			const tasks: IAITask[] = aiResult.tasks.map(aiTask => ({
+				id: generateUuid(),
+				title: aiTask.title,
+				description: aiTask.description,
+				completed: false,
+				filePath: aiTask.filePath,
+				dependencies: aiTask.dependencies,
+				createdAt: Date.now()
+			}));
+
+			if (this._currentConversation) {
+				this.tasks.set(this._currentConversation.id, tasks);
+				
+				const aiMessage: IAIMessage = {
+					id: generateUuid(),
+					type: MessageType.Assistant,
+					content: `Generated ${tasks.length} tasks for implementation.\n\n**Reasoning:** ${aiResult.reasoning}`,
+					timestamp: Date.now(),
+					metadata: { tasks: tasks.map(t => t.title) }
+				};
+
+				this._currentConversation.messages.push(aiMessage);
+				await this.saveConversation(this._currentConversation);
+				this._onDidChangeConversation.fire(this._currentConversation);
+			}
+
+			this.setState(ConversationState.Idle);
+			return tasks;
+
+		} catch (error: any) {
+			this.setState(ConversationState.Idle);
+			this.logService.error('Failed to generate tasks:', error);
+			throw error;
+		}
+	}
+
+	async generateCode(tasks: IAITask[], selectedTasks?: string[]): Promise<void> {
+		this.ensureInitialized();
+		this.setState(ConversationState.GeneratingCode);
+
+		try {
+			if (!this.aiProvider) {
+				throw new Error('AI provider not configured');
+			}
+
+			const projectContext = await this.generateProjectContext();
+			
+			const aiTasks = {
+				tasks: tasks.map(task => ({
+					title: task.title,
+					description: task.description,
+					filePath: task.filePath,
+					dependencies: task.dependencies,
+					estimatedTime: '2 hours',
+					complexity: 'medium' as const
+				})),
+				reasoning: ''
+			};
+
+			const aiResult = await this.aiProvider.generateCode(aiTasks, selectedTasks, projectContext);
+
+			for (const file of aiResult.files) {
+				await this.fileSystemManager.writeFile(file.path, file.content, {
+					createBackup: true,
+					verifyWrite: true
+				});
+				
+				this.logService.info(`Generated file: ${file.path}`);
+			}
+
+			if (this._currentConversation) {
+				const aiMessage: IAIMessage = {
+					id: generateUuid(),
+					type: MessageType.Assistant,
+					content: `Generated code for ${aiResult.files.length} files:\n\n${aiResult.files.map(f => `- ${f.path}: ${f.description}`).join('\n')}\n\n**Reasoning:** ${aiResult.reasoning}`,
+					timestamp: Date.now(),
+					metadata: { files: aiResult.files.map(f => f.path) }
+				};
+
+				this._currentConversation.messages.push(aiMessage);
+				await this.saveConversation(this._currentConversation);
+				this._onDidChangeConversation.fire(this._currentConversation);
+			}
+
+			this.setState(ConversationState.Idle);
+
+		} catch (error: any) {
+			this.setState(ConversationState.Idle);
+			this.logService.error('Failed to generate code:', error);
+			throw error;
+		}
+	}
+
+	async getTasks(conversationId?: string): Promise<IAITask[]> {
+		this.ensureInitialized();
+		const id = conversationId || this._currentConversation?.id;
+		return id ? this.tasks.get(id) || [] : [];
+	}
+
+	async updateTask(taskId: string, updates: Partial<IAITask>): Promise<void> {
+		this.ensureInitialized();
+		
+		if (!this._currentConversation) {
+			return;
+		}
+
+		const tasks = this.tasks.get(this._currentConversation.id) || [];
+		const taskIndex = tasks.findIndex(t => t.id === taskId);
+		
+		if (taskIndex >= 0) {
+			tasks[taskIndex] = { ...tasks[taskIndex], ...updates };
+			this.tasks.set(this._currentConversation.id, tasks);
+		}
+	}
+
+	async completeTask(taskId: string): Promise<void> {
+		await this.updateTask(taskId, { completed: true });
+	}
+
+	async deleteTask(taskId: string): Promise<void> {
+		this.ensureInitialized();
+		
+		if (!this._currentConversation) {
+			return;
+		}
+
+		const tasks = this.tasks.get(this._currentConversation.id) || [];
+		const filteredTasks = tasks.filter(t => t.id !== taskId);
+		this.tasks.set(this._currentConversation.id, filteredTasks);
+	}
+
+	async loadProjectMemory(workspaceUri: URI): Promise<IProjectMemory | undefined> {
+		try {
+			const memory = await this.fileSystemManager.readJsonFile<IProjectMemory>(
+				AICompanionFiles.PROJECT_MEMORY,
+				PROJECT_MEMORY_SCHEMA
+			);
+
+			this._projectMemory = memory;
+			if (memory) {
+				this._onDidUpdateProjectMemory.fire(memory);
+			}
+			return memory;
+
+		} catch (error: any) {
+			this.logService.info('No existing project memory found, starting fresh');
+			return undefined;
+		}
+	}
+
+	async saveProjectMemory(memory: IProjectMemory): Promise<void> {
+		this.ensureInitialized();
+		
+		await this.fileSystemManager.writeJsonFile(
+			AICompanionFiles.PROJECT_MEMORY,
+			memory,
+			PROJECT_MEMORY_SCHEMA
+		);
+
+		this._projectMemory = memory;
+		this._onDidUpdateProjectMemory.fire(memory);
+	}
+
+	async updateProjectMemory(updates: Partial<IProjectMemory>): Promise<void> {
+		this.ensureInitialized();
+
+		const currentMemory = this._projectMemory || {
+			projectName: 'Untitled Project',
+			goals: [],
+			stack: [],
+			architecture: '',
+			features: [],
+			userPreferences: {},
+			conversations: [],
+			lastUpdated: Date.now()
+		};
+
+		const updatedMemory: IProjectMemory = {
+			...currentMemory,
+			...updates,
+			lastUpdated: Date.now()
+		};
+
+		await this.saveProjectMemory(updatedMemory);
+	}
+
+	async clearProjectMemory(): Promise<void> {
+		this.ensureInitialized();
+		
+		try {
+			await this.fileSystemManager.deleteFile(AICompanionFiles.PROJECT_MEMORY);
+		} catch (error: any) {
+		}
+
+		this._projectMemory = undefined;
+	}
+
+	async setMode(mode: AICompanionMode): Promise<void> {
+		this.ensureInitialized();
+		
+		this._currentMode = mode;
+		
+		if (this._currentConversation) {
+			this._currentConversation.mode = mode;
+			await this.saveConversation(this._currentConversation);
+		}
+
+		this._onDidChangeMode.fire(mode);
+	}
+
+	getMode(): AICompanionMode {
+		return this._currentMode;
+	}
+
+	setState(state: ConversationState): void {
+		this._currentState = state;
+		
+		if (this._currentConversation) {
+			this._currentConversation.state = state;
+		}
+
+		this._onDidChangeState.fire(state);
+	}
+
+	getState(): ConversationState {
+		return this._currentState;
+	}
+
+	async revertChanges(files: URI[]): Promise<void> {
+		this.ensureInitialized();
+		
+		this.logService.info(`Reverting changes for ${files.length} files`);
+	}
+
+	async getModifiedFiles(): Promise<URI[]> {
+		this.ensureInitialized();
+		
+		return [];
+	}
+
+	async createTasksFile(tasks: IAITask[]): Promise<URI> {
+		this.ensureInitialized();
+		
+		let content = '# Tasks\n\n';
+		
+		for (const task of tasks) {
+			const checkbox = task.completed ? '[x]' : '[ ]';
+			content += `- ${checkbox} ${task.title}`;
+			if (task.filePath) {
+				content += ` (${task.filePath})`;
+			}
+			content += `\n`;
+			
+			if (task.description) {
+				content += `  ${task.description}\n`;
+			}
+			content += '\n';
+		}
+
+		await this.fileSystemManager.writeFile(AICompanionFiles.TASKS_FILE, content);
+		return URI.file(this.fileSystemManager.resolveProjectPath(AICompanionFiles.TASKS_FILE));
+	}
+
+	isWorkspaceCompatible(): boolean {
+		return this.fileSystemManager.getInitialized() && 
+			   this.fileSystemManager.detectWorkspaceRoot() !== null;
+	}
+
+	async getWorkspaceInfo(): Promise<{
+		name: string;
+		rootPath: string;
+		files: string[];
+		gitBranch?: string;
+	}> {
+		this.ensureInitialized();
+		
+		const rootPath = this.fileSystemManager.detectWorkspaceRoot() || '';
+		const workspace = this.workspaceService.getWorkspace();
+		
+		return {
+			name: workspace.folders?.[0]?.name || 'Unknown',
+			rootPath: rootPath,
+			files: [],
+			gitBranch: undefined
+		};
+	}
+
+	private ensureInitialized(): void {
+		if (!this._isInitialized) {
+			throw new Error('AI Companion Service not initialized');
+		}
+	}
+
+	private async saveConversation(conversation: IAIConversation): Promise<void> {
+		try {
+			const conversationFile = `${AICompanionFiles.CONVERSATION_BACKUP}.${conversation.id}.json`;
+			await this.fileSystemManager.writeJsonFile(
+				conversationFile,
+				conversation,
+				CONVERSATION_SCHEMA
+			);
+		} catch (error: any) {
+			this.logService.error('Failed to save conversation:', error);
+		}
+	}
+
+	private async loadExistingConversations(): Promise<void> {
+	}
+}

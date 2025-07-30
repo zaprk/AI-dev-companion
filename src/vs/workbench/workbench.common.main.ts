@@ -425,3 +425,4 @@ import './contrib/editTelemetry/browser/editTelemetry.contribution.js';
 
 
 //#endregion
+import './contrib/aiCompanion/common/aiCompanion.contribution.js';

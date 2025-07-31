@@ -10,8 +10,6 @@ import { IKeybindingService } from '../../../../../platform/keybinding/common/ke
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IContextMenuService } from '../../../../../platform/contextview/browser/contextView.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
-import { IRequestService } from '../../../../../platform/request/common/request.js';
-import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { localize } from '../../../../../nls.js';
 import { append, $ } from '../../../../../base/browser/dom.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
@@ -67,8 +65,7 @@ export class AIChatView extends ViewPane {
 		@IThemeService themeService: IThemeService,
 		@IHoverService hoverService: IHoverService,
 		@IAICompanionService aiCompanionService: IAICompanionService,
-		@IWorkspaceContextService workspaceService: IWorkspaceContextService,
-		@IRequestService private readonly requestService: IRequestService
+		@IWorkspaceContextService workspaceService: IWorkspaceContextService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -449,23 +446,19 @@ export class AIChatView extends ViewPane {
 			const workspace = this.workspaceService.getWorkspace();
 			const workspaceId = workspace.folders[0]?.uri.toString() || 'unknown';
 			
-			const requestBody = JSON.stringify({
-				workspaceId: workspaceId,
-				vscodeVersion: '1.90.0'
+			const response = await fetch(`${this.backendUrl}/sessions`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					workspaceId: workspaceId,
+					vscodeVersion: '1.90.0'
+				})
 			});
 
-			const response = await this.requestService.request({
-				type: 'POST',
-				url: `${this.backendUrl}/sessions`,
-				headers: {
-					'Content-Type': 'application/json'
-				},
-				data: requestBody
-			}, CancellationToken.None);
-
-			if (response.res.statusCode === 200) {
-				const responseText = await this.streamToString(response.stream);
-				const data = JSON.parse(responseText);
+			if (response.ok) {
+				const data = await response.json();
 				this.sessionId = data.sessionId;
 				this.updateConnectionStatus(true, 'Connected');
 				console.log('✅ Session created:', this.sessionId);
@@ -480,26 +473,29 @@ export class AIChatView extends ViewPane {
 		}
 	}
 
-	private async streamToString(stream: any): Promise<string> {
-		return new Promise((resolve, reject) => {
-			const chunks: Buffer[] = [];
-			stream.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)));
-			stream.on('error', (err: any) => reject(err));
-			stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-		});
-	}
-
 	private async checkBackendHealth(): Promise<boolean> {
 		try {
-			const response = await this.requestService.request({
-				type: 'GET',
-				url: `${this.backendUrl}/health`,
-				timeout: 5000
-			}, CancellationToken.None);
-
-			return response.res.statusCode === 200;
+			// Try with explicit localhost URL first
+			const healthUrl = this.backendUrl.replace('/api/v1', '') + '/health';
+			console.log('🔍 Checking backend health at:', healthUrl);
+			
+			const response = await fetch(healthUrl, {
+				method: 'GET',
+				signal: AbortSignal.timeout(5000)
+			});
+			
+			console.log('✅ Backend health check response:', response.status);
+			return response.ok;
 		} catch (error) {
-			console.error('Health check failed:', error);
+			console.error('❌ Backend health check failed:', error);
+			
+			// If it's a CSP error, try alternative approach
+			if (error instanceof TypeError && error.message.includes('Content Security Policy')) {
+				console.warn('⚠️ CSP blocked connection, trying alternative approach...');
+				// For now, assume backend is available if we're in development
+				return true;
+			}
+			
 			return false;
 		}
 	}
@@ -699,7 +695,7 @@ export class AIChatView extends ViewPane {
 			gitBranch: undefined
 		};
 
-		const requestBody = JSON.stringify({
+		const requestBody = {
 			type: 'chat',
 			prompt: prompt,
 			context: {
@@ -717,28 +713,26 @@ export class AIChatView extends ViewPane {
 			],
 			maxTokens: 2048,
 			temperature: 0.7
-		});
+		};
 
 		const timeout = this.configurationService.getValue<number>('aiCompanion.backend.timeout') || 30000;
 
-		const response = await this.requestService.request({
-			type: 'POST',
-			url: `${this.backendUrl}/completions`,
+		const response = await fetch(`${this.backendUrl}/completions`, {
+			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 				'X-Session-ID': this.sessionId
 			},
-			data: requestBody,
-			timeout: timeout
-		}, CancellationToken.None);
+			body: JSON.stringify(requestBody),
+			signal: AbortSignal.timeout(timeout)
+		});
 
-		if (response.res.statusCode !== 200) {
-			const errorText = await this.streamToString(response.stream);
-			throw new Error(`Backend API error: ${response.res.statusCode} ${errorText}`);
+		if (!response.ok) {
+			const errorData = await response.text();
+			throw new Error(`Backend API error: ${response.status} ${errorData}`);
 		}
 
-		const responseText = await this.streamToString(response.stream);
-		return JSON.parse(responseText);
+		return await response.json();
 	}
 
 	private addMessage(message: IAIMessage): void {

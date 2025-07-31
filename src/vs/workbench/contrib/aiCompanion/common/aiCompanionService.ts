@@ -33,6 +33,14 @@ export interface IAIMessage {
 		files?: string[];
 		tasks?: string[];
 		requirements?: string[];
+		usage?: {
+			promptTokens: number;
+			completionTokens: number;
+			totalTokens: number;
+		};
+		requestId?: string;
+		model?: string;
+		finishReason?: string;
 	};
 }
 

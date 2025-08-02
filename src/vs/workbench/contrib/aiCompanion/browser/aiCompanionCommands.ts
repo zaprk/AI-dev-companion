@@ -3,6 +3,7 @@ import { CommandsRegistry } from '../../../../platform/commands/common/commands.
 import { MenuRegistry, MenuId } from '../../../../platform/actions/common/actions.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { AICompanionCommands, AICompanionViewIds, AICompanionContext } from '../common/aiCompanionServiceTokens.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 
 CommandsRegistry.registerCommand({
 	id: AICompanionCommands.Focus,
@@ -38,7 +39,7 @@ MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 		title: localize('aiCompanion.focus', 'AI Companion: Focus'),
 		category: localize('aiCompanion.category', 'AI Companion')
 	},
-	when: AICompanionContext.Enabled
+	when: ContextKeyExpr.equals(AICompanionContext.Enabled, true)
 });
 
 MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
@@ -55,5 +56,5 @@ MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 		title: localize('aiCompanion.newConversation', 'AI Companion: New Conversation'),
 		category: localize('aiCompanion.category', 'AI Companion')
 	},
-	when: AICompanionContext.Enabled
+	when: ContextKeyExpr.equals(AICompanionContext.Enabled, true)
 });

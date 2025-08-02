@@ -1,86 +1,285 @@
-import { RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
+import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
-export const AICompanionContext = {
-	Enabled: new RawContextKey<boolean>('aiCompanion.enabled', false, { type: 'boolean', description: 'Whether AI Companion is enabled' }),
-	PanelVisible: new RawContextKey<boolean>('aiCompanion.panelVisible', false, { type: 'boolean', description: 'Whether AI Companion panel is visible' }),
-	HasActiveConversation: new RawContextKey<boolean>('aiCompanion.hasActiveConversation', false, { type: 'boolean', description: 'Whether there is an active AI conversation' }),
-	
-	IsHelperMode: new RawContextKey<boolean>('aiCompanion.isHelperMode', true, { type: 'boolean', description: 'Whether AI is in Helper mode' }),
-	IsBuilderMode: new RawContextKey<boolean>('aiCompanion.isBuilderMode', false, { type: 'boolean', description: 'Whether AI is in Builder mode' }),
-	
-	IsGenerating: new RawContextKey<boolean>('aiCompanion.isGenerating', false, { type: 'boolean', description: 'Whether AI is currently generating content' }),
-	HasTasks: new RawContextKey<boolean>('aiCompanion.hasTasks', false, { type: 'boolean', description: 'Whether there are active tasks' }),
-	HasProjectMemory: new RawContextKey<boolean>('aiCompanion.hasProjectMemory', false, { type: 'boolean', description: 'Whether project memory exists' }),
-	
-	IsWorkspaceCompatible: new RawContextKey<boolean>('aiCompanion.isWorkspaceCompatible', false, { type: 'boolean', description: 'Whether current workspace is compatible with AI Companion' }),
-	HasGitRepository: new RawContextKey<boolean>('aiCompanion.hasGitRepository', false, { type: 'boolean', description: 'Whether workspace has Git repository' })
-};
+// Core service interfaces
+export interface IAIBackendService {
+	readonly _serviceBrand: undefined;
+	initializeSession(workspaceId: string): Promise<ISessionInfo>;
+	sendRequest(request: IAIRequest): Promise<IAIResponse>;
+	sendStreamingRequest(
+		request: IAIRequest,
+		onChunk: (chunk: IAIStreamChunk) => void,
+		onComplete: (response: IAIResponse) => void,
+		onError: (error: Error) => void
+	): Promise<void>;
+	checkHealth(): Promise<boolean>;
+	checkStreamingEndpoint(): Promise<boolean>;
+	cancelRequest(requestId: string): void;
+	cancelAllRequests(): void;
+	getSessionInfo(): ISessionInfo | null;
+	clearSession(): void;
+	getCacheKey(request: IAIRequest): string;
+	getFromCache(key: string): IAIResponse | null;
+	setCache(key: string, response: IAIResponse): void;
+	cleanupCache(): void;
+}
 
+export interface IStreamProcessor {
+	readonly _serviceBrand: undefined;
+	startStreaming(requestId: string, workflowType?: string): void;
+	processChunk(requestId: string, chunk: IAIStreamChunk): string;
+	completeStreaming(requestId: string): IAIResponse | null;
+	cancelStreaming(requestId: string): void;
+	getStreamingState(requestId: string): IStreamingState | null;
+	isStreaming(requestId: string): boolean;
+	getActiveStreamCount(): number;
+}
+
+export interface IMessageFormatter {
+	readonly _serviceBrand: undefined;
+	renderMarkdown(content: string): string;
+	formatWorkflowResponse(content: any, workflowType: string): string;
+	formatStructuredContent(parsed: any, workflowType: string): string;
+}
+
+export interface IWorkflowDetector {
+	readonly _serviceBrand: undefined;
+	detectWorkflowType(content: string): string;
+	analyzeContext(workspaceRoot: string): Promise<IWorkflowContext>;
+	detectTechStack(workspaceRoot: string): Promise<string[]>;
+	detectArchitecture(workspaceRoot: string): Promise<string>;
+	detectGitBranch(workspaceRoot: string): Promise<string | undefined>;
+	getFileStructureFast(workspaceRoot: string, maxDepth?: number): Promise<string>;
+}
+
+export interface IConnectionManager {
+	readonly _serviceBrand: undefined;
+	connect(): Promise<boolean>;
+	disconnect(): void;
+	checkHealth(): Promise<boolean>;
+	checkStreamingEndpoint(): Promise<boolean>;
+	isConnected(): boolean;
+	getConnectionStatus(): IConnectionStatus;
+	getConnectionPool(): IConnectionPool;
+	getConnectionId(): string;
+	canMakeRequest(): boolean;
+	acquireConnection(): string | null;
+	releaseConnection(connectionId: string): void;
+	cleanupConnectionPool(): void;
+	updateConnectionStatus(status: Partial<IConnectionStatus>): void;
+	getConnectionStats(): {
+		totalConnections: number;
+		activeConnections: number;
+		availableConnections: number;
+		errorCount: number;
+		averageLatency: number;
+	};
+	dispose(): void;
+	readonly onConnectionStatusChanged: Event<IConnectionStatus>;
+}
+
+export interface IPerformanceMonitor {
+	readonly _serviceBrand: undefined;
+	startTimer(operation: string): () => void;
+	getAverageTime(operation: string): number;
+}
+
+export interface IErrorHandler {
+	readonly _serviceBrand: undefined;
+	handleError(error: Error, context: string, severity?: 'info' | 'warning' | 'error'): void;
+	getErrorMessage(error: any): string;
+}
+
+export interface IStateManager {
+	readonly _serviceBrand: undefined;
+	getState(): IAICompanionState;
+	updateState(partial: Partial<IAICompanionState>): void;
+	updateUIState(partial: Partial<IUIState>): void;
+	createConversation(id: string): IAIConversation;
+	getConversation(id: string): IAIConversation | null;
+	getCurrentConversation(): IAIConversation | null;
+	getAllConversations(): IAIConversation[];
+	updateConversation(id: string, partial: Partial<IAIConversation>): void;
+	deleteConversation(id: string): void;
+	setCurrentConversation(id: string): void;
+	clearAllConversations(): void;
+	updatePerformanceMetrics(metrics: Partial<IAICompanionStatePerformance>): void;
+	updateConnectionStatus(status: Partial<IConnectionStatus>): void;
+	getStateSnapshot(): {
+		totalConversations: number;
+		currentConversationId?: string;
+		isConnected: boolean;
+		isTyping: boolean;
+		performance: IAICompanionStatePerformance;
+	};
+	resetState(): void;
+	dispose(): void;
+	readonly onStateChange: Event<IAICompanionState>;
+	readonly onConversationChange: Event<IAIConversation>;
+	readonly onUIStateChange: Event<IUIState>;
+}
+
+export interface IConfigurationService {
+	readonly _serviceBrand: undefined;
+	readonly backendUrl: string;
+	readonly streamingEnabled: boolean;
+	readonly cacheDuration: number;
+	readonly maxConcurrentRequests: number;
+	readonly timeout: number;
+}
+
+// Service tokens
+export const IAIBackendService = createDecorator<IAIBackendService>('aiBackendService');
+export const IStreamProcessor = createDecorator<IStreamProcessor>('streamProcessor');
+export const IMessageFormatter = createDecorator<IMessageFormatter>('messageFormatter');
+export const IWorkflowDetector = createDecorator<IWorkflowDetector>('workflowDetector');
+export const IConnectionManager = createDecorator<IConnectionManager>('connectionManager');
+export const IPerformanceMonitor = createDecorator<IPerformanceMonitor>('performanceMonitor');
+export const IErrorHandler = createDecorator<IErrorHandler>('errorHandler');
+export const IStateManager = createDecorator<IStateManager>('stateManager');
+export const IAICompanionConfigurationService = createDecorator<IConfigurationService>('aiCompanionConfigurationService');
+
+// Types
+export interface IAIRequest {
+	type: string;
+	prompt: string;
+	context: any;
+	sessionId: string;
+	messages: Array<{ role: string; content: string }>;
+	maxTokens?: number;
+	temperature?: number;
+	mode: string;
+	content: string;
+}
+
+export interface IAIResponse {
+	content: string;
+	usage?: {
+		promptTokens: number;
+		completionTokens: number;
+		totalTokens: number;
+	};
+	model?: string;
+	finishReason?: string;
+	sessionId: string;
+	requestId?: string;
+	id: string;
+	metadata?: any;
+	timestamp: number;
+}
+
+export interface IAIStreamChunk {
+	content: string;
+	isComplete: boolean;
+	error?: string;
+}
+
+export interface ISessionInfo {
+	sessionId: string;
+	workspaceId: string;
+	createdAt: Date;
+}
+
+export interface IStreamingState {
+	isStreaming: boolean;
+	accumulatedContent: string;
+	lastUpdateTime: number;
+	chunkCount: number;
+	currentWorkflowType?: string;
+}
+
+export interface IWorkflowContext {
+	techStack: string[];
+	architecture: string;
+	gitBranch?: string;
+	fileStructure: string;
+	workspaceRoot: string;
+}
+
+export interface IConnectionStatus {
+	isConnected: boolean;
+	isHealthy: boolean;
+	lastHealthCheck: number;
+	connectionId: string;
+	sessionId?: string;
+	errorCount: number;
+	latency: number;
+	health: 'healthy' | 'unhealthy' | 'unknown';
+	error?: string;
+}
+
+export interface IConnectionPool {
+	maxConnections: number;
+	activeConnections: number;
+	availableConnections: number;
+	connectionIds: string[];
+}
+
+export interface IUIState {
+	isTyping: boolean;
+	isInitializing: boolean;
+	isConnected: boolean;
+}
+
+export interface IAICompanionStatePerformance {
+	lastRequestTime: number;
+	averageResponseTime: number;
+	totalRequests: number;
+	successfulRequests: number;
+	failedRequests: number;
+}
+
+export interface IAICompanionState {
+	conversations: IAIConversation[];
+	conversationOrder: string[];
+	currentConversationId: string | null;
+	maxConversations: number;
+	ui: IUIState;
+	performance: IAICompanionStatePerformance;
+	connectionStatus: IConnectionStatus;
+}
+
+// Import existing types
+import { IAIMessage } from './aiCompanionService.js';
+import { Event } from '../../../../base/common/event.js';
+
+// Add missing types
+export interface IAIConversation {
+	id: string;
+	messages: IAIMessage[];
+	createdAt: number;
+	updatedAt: number;
+	state: ConversationState;
+}
+
+export enum ConversationState {
+	Idle = 'idle',
+	Typing = 'typing',
+	Generating = 'generating',
+	Error = 'error',
+	Active = 'active'
+}
+
+// Command constants
 export const AICompanionCommands = {
 	Focus: 'aiCompanion.focus',
 	Toggle: 'aiCompanion.toggle',
-	Hide: 'aiCompanion.hide',
-	
-	NewConversation: 'aiCompanion.newConversation',
-	DeleteConversation: 'aiCompanion.deleteConversation',
-	SwitchConversation: 'aiCompanion.switchConversation',
-	ClearMessages: 'aiCompanion.clearMessages',
-	
-	GenerateRequirements: 'aiCompanion.generateRequirements',
-	GenerateDesign: 'aiCompanion.generateDesign',
-	GenerateTasks: 'aiCompanion.generateTasks',
-	GenerateCode: 'aiCompanion.generateCode',
-	
-	SetHelperMode: 'aiCompanion.setHelperMode',
-	SetBuilderMode: 'aiCompanion.setBuilderMode',
-	ToggleMode: 'aiCompanion.toggleMode',
-	
-	CompleteTask: 'aiCompanion.completeTask',
-	DeleteTask: 'aiCompanion.deleteTask',
-	EditTask: 'aiCompanion.editTask',
-	CreateTasksFile: 'aiCompanion.createTasksFile',
-	
-	RevertChanges: 'aiCompanion.revertChanges',
-	ShowModifiedFiles: 'aiCompanion.showModifiedFiles',
-	
-	ClearProjectMemory: 'aiCompanion.clearProjectMemory',
-	ExportProjectMemory: 'aiCompanion.exportProjectMemory',
-	ImportProjectMemory: 'aiCompanion.importProjectMemory'
-};
+	NewConversation: 'aiCompanion.newConversation'
+} as const;
 
+// View ID constants
 export const AICompanionViewIds = {
-	VIEWLET_ID: 'workbench.view.aiCompanion',
-	
 	CHAT_VIEW_ID: 'aiCompanion.chatView',
-	TASKS_VIEW_ID: 'aiCompanion.tasksView',
-	REQUIREMENTS_VIEW_ID: 'aiCompanion.requirementsView',
-	DESIGN_VIEW_ID: 'aiCompanion.designView',
-	MEMORY_VIEW_ID: 'aiCompanion.memoryView'
-};
+	VIEWLET_ID: 'aiCompanion.viewlet'
+} as const;
 
-export const AICompanionConfiguration = {
-	SECTION: 'aiCompanion',
-	
-	ENABLED: 'aiCompanion.enabled',
-	DEFAULT_MODE: 'aiCompanion.defaultMode',
-	AUTO_SAVE_GENERATED_FILES: 'aiCompanion.autoSaveGeneratedFiles',
-	MEMORY_RETENTION_DAYS: 'aiCompanion.memoryRetentionDays',
-	MAX_CONVERSATION_HISTORY: 'aiCompanion.maxConversationHistory',
-	SHOW_TASK_PROGRESS: 'aiCompanion.showTaskProgress',
-	AUTO_CREATE_TASKS_FILE: 'aiCompanion.autoCreateTasksFile',
-	ENABLE_CODE_LENS: 'aiCompanion.enableCodeLens',
-	ENABLE_INLINE_SUGGESTIONS: 'aiCompanion.enableInlineSuggestions'
-};
+// Context constants
+export const AICompanionContext = {
+	Enabled: 'aiCompanion.enabled'
+} as const;
 
-export const AICompanionActivityBarPosition = {
-	ORDER: 4,
-	ID: 'workbench.view.aiCompanion'
-};
-
+// File constants
 export const AICompanionFiles = {
-	PROJECT_MEMORY: '.ai.memory',
-	TASKS_FILE: 'tasks.md',
-	REQUIREMENTS_FILE: 'requirements.md',
-	DESIGN_FILE: 'design.md',
-	CONVERSATION_BACKUP: '.ai.conversations'
-};
+	PROJECT_MEMORY: '.ai-companion/project-memory.json',
+	CONVERSATION_BACKUP: '.ai-companion/conversations/conversation',
+	TASKS_FILE: '.ai-companion/tasks.md'
+} as const;

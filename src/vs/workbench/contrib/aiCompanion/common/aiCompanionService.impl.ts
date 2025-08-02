@@ -130,31 +130,39 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 	}
 
 	private initializeAIProvider(): void {
-    try {
-        const aiConfig = this.configurationService.getValue('aiCompanion.ai');
-        
-        if (aiConfig && typeof aiConfig === 'object') {
-            const config = aiConfig as any;
-            if (config.provider && config.apiKey) {
-                this.logService.info('AI provider configured:', config.provider);
-                // For now, just log that it's configured - remove the actual provider initialization
-                // that's causing the error
-            } else {
-                this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
-            }
-        } else {
-            this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
-        }
-        
-        // Set aiProvider to undefined for now to avoid initialization errors
-        this.aiProvider = undefined;
-    } catch (error: any) {
-        // Safe error handling - check if error exists and has message property
-        const errorMessage = error && error.message ? error.message : String(error || 'Unknown error');
-        this.logService.error('Failed to initialize AI provider:', errorMessage);
-        this.aiProvider = undefined;
-    }
-}
+		try {
+			const aiConfig = this.configurationService.getValue('aiCompanion.ai');
+			
+			if (aiConfig && typeof aiConfig === 'object') {
+				const config = aiConfig as any;
+				if (config.provider && config.apiKey) {
+					this.logService.info('AI provider configured:', config.provider);
+					// For now, just log that it's configured - remove the actual provider initialization
+					// that's causing the error
+				} else {
+					this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
+				}
+			} else {
+				this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
+			}
+			
+			// Set aiProvider to undefined for now to avoid initialization errors
+			this.aiProvider = undefined;
+		} catch (error: unknown) {
+			// Completely safe error handling
+			let errorMessage = 'Unknown error';
+			if (error) {
+				if (typeof error === 'string') {
+					errorMessage = error;
+				} else if (typeof error === 'object' && error !== null) {
+					const errorObj = error as any;
+					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
+				}
+			}
+			this.logService.error('Failed to initialize AI provider:', errorMessage);
+			this.aiProvider = undefined;
+		}
+	}
 
 	private async generateProjectContext(): Promise<any> {
 		const workspaceInfo = await this.getWorkspaceInfo();
@@ -240,9 +248,19 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			this._isInitialized = true;
 			this.logService.info('AI Companion Service initialized successfully');
 
-		} catch (error: any) {
-			this.logService.error('Failed to initialize AI Companion Service:', error);
-			throw error;
+		} catch (error: unknown) {
+			// Safe error handling
+			let errorMessage = 'Unknown error';
+			if (error) {
+				if (typeof error === 'string') {
+					errorMessage = error;
+				} else if (typeof error === 'object' && error !== null) {
+					const errorObj = error as any;
+					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
+				}
+			}
+			this.logService.error('Failed to initialize AI Companion Service:', errorMessage);
+			throw new Error(errorMessage);
 		}
 	}
 
@@ -306,8 +324,18 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			if (await this.fileSystemManager.fileExists(conversationFile)) {
 				await this.fileSystemManager.deleteFile(conversationFile);
 			}
-		} catch (error: any) {
-			this.logService.warn(`Failed to delete conversation file for ${id}:`, error);
+		} catch (error: unknown) {
+			// Safe error handling
+			let errorMessage = 'Unknown error';
+			if (error) {
+				if (typeof error === 'string') {
+					errorMessage = error;
+				} else if (typeof error === 'object' && error !== null) {
+					const errorObj = error as any;
+					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
+				}
+			}
+			this.logService.warn(`Failed to delete conversation file for ${id}:`, errorMessage);
 		}
 
 		if (this._currentConversation?.id === id) {
@@ -428,23 +456,35 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			this.setState(ConversationState.Idle);
 			return requirements;
 
-		} catch (error: any) {
+		} catch (error: unknown) {
 			this.setState(ConversationState.Idle);
-			this.logService.error('Failed to generate requirements:', error);
+			
+			// Safe error handling
+			let errorMessage = 'Unknown error';
+			if (error) {
+				if (typeof error === 'string') {
+					errorMessage = error;
+				} else if (typeof error === 'object' && error !== null) {
+					const errorObj = error as any;
+					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
+				}
+			}
+			
+			this.logService.error('Failed to generate requirements:', errorMessage);
 			
 			if (this._currentConversation) {
-				const errorMessage: IAIMessage = {
+				const errorMsg: IAIMessage = {
 					id: generateUuid(),
 					type: MessageType.System,
-					content: `Error generating requirements: ${error.message}`,
+					content: `Error generating requirements: ${errorMessage}`,
 					timestamp: Date.now()
 				};
-				this._currentConversation.messages.push(errorMessage);
+				this._currentConversation.messages.push(errorMsg);
 				await this.saveConversation(this._currentConversation);
 				this._onDidChangeConversation.fire(this._currentConversation);
 			}
 			
-			throw error;
+			throw new Error(errorMessage);
 		}
 	}
 
@@ -674,7 +714,7 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			}
 			return memory;
 
-		} catch (error: any) {
+		} catch (error: unknown) {
 			this.logService.info('No existing project memory found, starting fresh');
 			return undefined;
 		}
@@ -721,7 +761,8 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		
 		try {
 			await this.fileSystemManager.deleteFile(AICompanionFiles.PROJECT_MEMORY);
-		} catch (error: any) {
+		} catch (error: unknown) {
+			// Ignore errors when clearing project memory
 		}
 
 		this._projectMemory = undefined;
@@ -831,8 +872,18 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				conversation,
 				CONVERSATION_SCHEMA
 			);
-		} catch (error: any) {
-			this.logService.error('Failed to save conversation:', error);
+		} catch (error: unknown) {
+			// Safe error handling
+			let errorMessage = 'Unknown error';
+			if (error) {
+				if (typeof error === 'string') {
+					errorMessage = error;
+				} else if (typeof error === 'object' && error !== null) {
+					const errorObj = error as any;
+					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
+				}
+			}
+			this.logService.error('Failed to save conversation:', errorMessage);
 		}
 	}
 

@@ -1,10 +1,7 @@
-import { IWorkflowDetector } from '../../common/aiCompanionServiceTokens.js';
-import { IPerformanceMonitor } from '../../common/aiCompanionServiceTokens.js';
-import { IErrorHandler } from '../../common/aiCompanionServiceTokens.js';
+import { IWorkflowDetector, IPerformanceMonitor, IErrorHandler } from '../../common/aiCompanionServiceTokens.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
-
-
+import { BaseService } from '../utils/baseService.js';
 import { URI } from '../../../../../base/common/uri.js';
 
 export interface IWorkflowContext {
@@ -17,8 +14,7 @@ export interface IWorkflowContext {
     confidence: number;
 }
 
-export class WorkflowDetector implements IWorkflowDetector {
-    readonly _serviceBrand: undefined;
+export class WorkflowDetector extends BaseService implements IWorkflowDetector {
 
     private workflowPatterns = {
         requirements: [
@@ -29,7 +25,11 @@ export class WorkflowDetector implements IWorkflowDetector {
             /non-functional requirements?/i,
             /acceptance criteria/i,
             /project scope/i,
-            /business requirements?/i
+            /business requirements?/i,
+            /what do we need/i,
+            /what should it do/i,
+            /features?/i,
+            /capabilities?/i
         ],
         design: [
             /design/i,
@@ -41,7 +41,11 @@ export class WorkflowDetector implements IWorkflowDetector {
             /wireframe/i,
             /mockup/i,
             /prototype/i,
-            /diagram/i
+            /diagram/i,
+            /structure/i,
+            /layout/i,
+            /how should it work/i,
+            /how to organize/i
         ],
         tasks: [
             /tasks?/i,
@@ -51,7 +55,11 @@ export class WorkflowDetector implements IWorkflowDetector {
             /sprint planning/i,
             /work breakdown/i,
             /milestones?/i,
-            /deliverables?/i
+            /deliverables?/i,
+            /steps?/i,
+            /what to do/i,
+            /how to implement/i,
+            /break down/i
         ],
         code: [
             /code/i,
@@ -64,7 +72,20 @@ export class WorkflowDetector implements IWorkflowDetector {
             /endpoint/i,
             /database/i,
             /query/i,
-            /algorithm/i
+            /algorithm/i,
+            /build/i,
+            /create/i,
+            /make/i,
+            /develop/i,
+            /program/i,
+            /write/i,
+            /generate/i,
+            /hello world/i,
+            /simple page/i,
+            /web page/i,
+            /website/i,
+            /app/i,
+            /application/i
         ]
     };
 
@@ -73,9 +94,11 @@ export class WorkflowDetector implements IWorkflowDetector {
     constructor(
         @IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
         @IFileService private readonly fileService: IFileService,
-        @IPerformanceMonitor private readonly performanceMonitor: IPerformanceMonitor,
-        @IErrorHandler private readonly errorHandler: IErrorHandler
-    ) {}
+        @IPerformanceMonitor performanceMonitor: IPerformanceMonitor,
+        @IErrorHandler errorHandler: IErrorHandler
+    ) {
+        super(errorHandler, performanceMonitor);
+    }
 
     detectWorkflowType(content: string): string {
         const timer = this.performanceMonitor.startTimer('workflow-detection');
@@ -107,6 +130,50 @@ export class WorkflowDetector implements IWorkflowDetector {
                 scores.code += 1;
             }
 
+            // Check for building/creation intent
+            const buildIntentPatterns = [
+                /i want to build/i,
+                /i want to create/i,
+                /i want to make/i,
+                /i want to develop/i,
+                /help me build/i,
+                /help me create/i,
+                /help me make/i,
+                /can you build/i,
+                /can you create/i,
+                /can you make/i,
+                /build a/i,
+                /create a/i,
+                /make a/i,
+                /develop a/i
+            ];
+
+            for (const pattern of buildIntentPatterns) {
+                if (pattern.test(content)) {
+                    scores.code += 3; // High priority for building intent
+                    break;
+                }
+            }
+
+            // Check for simple project requests
+            const simpleProjectPatterns = [
+                /hello world/i,
+                /simple page/i,
+                /basic page/i,
+                /web page/i,
+                /website/i,
+                /app/i,
+                /application/i,
+                /project/i
+            ];
+
+            for (const pattern of simpleProjectPatterns) {
+                if (pattern.test(content)) {
+                    scores.code += 2;
+                    break;
+                }
+            }
+
             // Find the workflow with the highest score
             let maxScore = 0;
             let detectedWorkflow = 'chat';
@@ -118,6 +185,11 @@ export class WorkflowDetector implements IWorkflowDetector {
                 }
             }
 
+            // Debug logging
+            console.log(`🔍 Workflow Detection for: "${content}"`);
+            console.log(`📊 Scores:`, scores);
+            console.log(`🎯 Detected: ${detectedWorkflow} (score: ${maxScore})`);
+
             timer();
             return detectedWorkflow;
         } catch (error) {
@@ -127,21 +199,20 @@ export class WorkflowDetector implements IWorkflowDetector {
         }
     }
 
-    async analyzeContext(): Promise<IWorkflowContext> {
-        const timer = this.performanceMonitor.startTimer('context-analysis');
-        
-        try {
-            const workspaceRoot = this.workspaceService.getWorkspace().folders[0]?.uri.fsPath || '';
+    async analyzeContext(workspaceRoot: string): Promise<IWorkflowContext> {
+        return this.withMonitoringAndErrorHandling('context-analysis', async () => {
+            // Use provided workspaceRoot or fall back to current workspace
+            const rootPath = workspaceRoot || this.workspaceService.getWorkspace().folders[0]?.uri.fsPath || '';
             
             const [techStack, architecture, gitBranch, fileStructure] = await Promise.all([
-                this.detectTechStack(workspaceRoot),
-                this.detectArchitecture(workspaceRoot),
-                this.detectGitBranch(workspaceRoot),
-                this.getFileStructureFast(workspaceRoot)
+                this.detectTechStack(rootPath),
+                this.detectArchitecture(rootPath),
+                this.detectGitBranch(rootPath),
+                this.getFileStructureFast(rootPath)
             ]);
 
             const context: IWorkflowContext = {
-                workspaceRoot,
+                workspaceRoot: rootPath,
                 techStack,
                 architecture,
                 gitBranch,
@@ -150,20 +221,8 @@ export class WorkflowDetector implements IWorkflowDetector {
                 confidence: 0.8
             };
 
-            timer();
             return context;
-        } catch (error) {
-            timer();
-            this.errorHandler.handleError(error as Error, 'Context analysis');
-            return {
-                workspaceRoot: '',
-                techStack: [],
-                architecture: 'unknown',
-                fileStructure: '',
-                detectedWorkflow: 'chat',
-                confidence: 0.0
-            };
-        }
+        });
     }
 
     async detectTechStack(workspaceRoot: string): Promise<string[]> {

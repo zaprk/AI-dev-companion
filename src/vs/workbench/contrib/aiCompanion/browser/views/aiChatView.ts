@@ -185,6 +185,8 @@ export class AIChatViewRefactored extends ViewPane {
 				context: context,
 				sessionId: '', // Will be set by backend service
 				messages: [{ role: 'user', content }],
+				maxTokens: undefined,
+				temperature: undefined,
 				mode: workflowType,
 				content: content
 			};
@@ -216,6 +218,8 @@ export class AIChatViewRefactored extends ViewPane {
 				context: await this.getWorkspaceContext(),
 				sessionId: '', // Will be set by backend service
 				messages: [{ role: 'user', content }],
+				maxTokens: undefined,
+				temperature: undefined,
 				mode: 'chat',
 				content: content
 			};
@@ -245,11 +249,24 @@ export class AIChatViewRefactored extends ViewPane {
 
 	private async getWorkspaceContext(): Promise<any> {
 		const workspace = this.workspaceService.getWorkspace();
+		const workspaceFolder = workspace.folders[0];
+		
 		return {
-			name: workspace.folders[0]?.name || 'Unknown',
-			rootPath: workspace.folders[0]?.uri.fsPath || '',
-			files: [],
-			gitBranch: undefined
+			workspace: {
+				name: workspaceFolder?.name || 'Unknown Workspace',
+				rootPath: workspaceFolder?.uri.fsPath || '',
+				files: [],
+				gitBranch: undefined
+			},
+			files: {
+				files: [],
+				directories: [],
+				totalFiles: 0,
+				totalSize: 0
+			},
+			techStack: [],
+			architecture: 'Not specified',
+			goals: []
 		};
 	}
 
@@ -961,4 +978,4 @@ Try saying: "I want to build a user auth system"`;
 	override dispose(): void {
 		super.dispose();
 	}
-} 
+}

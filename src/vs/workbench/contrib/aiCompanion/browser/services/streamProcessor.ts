@@ -1,9 +1,6 @@
-import { IStreamProcessor, IAIStreamChunk, IAIResponse } from '../../common/aiCompanionServiceTokens.js';
-import { IMessageFormatter } from '../../common/aiCompanionServiceTokens.js';
-import { IPerformanceMonitor } from '../../common/aiCompanionServiceTokens.js';
-import { IErrorHandler } from '../../common/aiCompanionServiceTokens.js';
-
-
+import { IStreamProcessor, IAIStreamChunk, IAIResponse, IMessageFormatter, IPerformanceMonitor, IErrorHandler } from '../../common/aiCompanionServiceTokens.js';
+import { BaseService } from '../utils/baseService.js';
+import { MapFactory } from '../utils/mapFactories.js';
 
 export interface IStreamingState {
     isStreaming: boolean;
@@ -13,29 +10,27 @@ export interface IStreamingState {
     currentWorkflowType?: string;
 }
 
-export class StreamProcessor implements IStreamProcessor {
-    readonly _serviceBrand: undefined;
-
-    private streamingStates = new Map<string, IStreamingState>();
+export class StreamProcessor extends BaseService implements IStreamProcessor {
+    private streamingStates = MapFactory.createStreamingStateMap();
 
     constructor(
         @IMessageFormatter private readonly messageFormatter: IMessageFormatter,
-        @IPerformanceMonitor private readonly performanceMonitor: IPerformanceMonitor,
-        @IErrorHandler private readonly errorHandler: IErrorHandler
-    ) {}
+        @IPerformanceMonitor performanceMonitor: IPerformanceMonitor,
+        @IErrorHandler errorHandler: IErrorHandler
+    ) {
+        super(errorHandler, performanceMonitor);
+    }
 
     startStreaming(requestId: string, workflowType?: string): void {
-        const timer = this.performanceMonitor.startTimer('stream-start');
-        
-        this.streamingStates.set(requestId, {
-            isStreaming: true,
-            accumulatedContent: '',
-            lastUpdateTime: Date.now(),
-            chunkCount: 0,
-            currentWorkflowType: workflowType
+        this.withPerformanceMonitoring('stream-start', async () => {
+            this.streamingStates.set(requestId, {
+                isStreaming: true,
+                accumulatedContent: '',
+                lastUpdateTime: Date.now(),
+                chunkCount: 0,
+                currentWorkflowType: workflowType
+            });
         });
-        
-        timer();
     }
 
     processChunk(requestId: string, chunk: IAIStreamChunk): string {

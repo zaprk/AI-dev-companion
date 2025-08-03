@@ -73,7 +73,7 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 //#region Startup Contribution
 class SearchEditorContribution implements IWorkbenchContribution {
 
-	static readonly ID = 'workbench.contrib.searchEditor';
+	static readonly ID = 'workbench.contrib.aiCompanion';
 
 	constructor(
 		@IEditorResolverService editorResolverService: IEditorResolverService,

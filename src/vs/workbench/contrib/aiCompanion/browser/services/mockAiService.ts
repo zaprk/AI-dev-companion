@@ -788,7 +788,7 @@ export class ProductController {
         return res.status(400).json({
           success: false,
           message: 'Validation failed',
-          errors: validation.errors
+          errors: validation.errors && Array.isArray(validation.errors) ? validation.errors : ['Unknown validation error']
         });
       }
 
@@ -836,7 +836,7 @@ export class ProductController {
         return res.status(400).json({
           success: false,
           message: 'Validation failed',
-          errors: validation.errors
+          errors: validation.errors && Array.isArray(validation.errors) ? validation.errors : ['Unknown validation error']
         });
       }
 

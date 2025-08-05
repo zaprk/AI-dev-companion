@@ -2,6 +2,12 @@ import { generateUuid } from '../../../../../base/common/uuid.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 
+// Import new utilities
+import { 
+	RetryUtils, 
+	ErrorUtils 
+} from '../utils/index.js';
+
 export interface BackendAIResponse {
 	content: string;
 	usage: {
@@ -84,94 +90,115 @@ export class BackendCommunicationService implements IBackendCommunicationService
 	}
 
 	async callAPI(type: string, prompt: string, currentMode: any): Promise<BackendAIResponse> {
-		const workspace = this.workspaceService.getWorkspace();
-		const workspaceInfo = {
-			name: workspace.folders[0]?.name || 'Unknown',
-			rootPath: workspace.folders[0]?.uri.fsPath || '',
-			files: [],
-			gitBranch: undefined
-		};
-
-		const requestBody = {
+		console.log('🔍 DEBUG callAPI called with:', {
 			type: type,
 			prompt: prompt,
-			context: {
-				workspace: workspaceInfo,
-				memory: null,
-				files: { files: [], directories: [], totalFiles: 0, totalSize: 0 },
-				currentMode: currentMode,
-				techStack: [],
-				architecture: '',
-				goals: []
-			},
+			currentMode: currentMode,
 			sessionId: this.sessionId,
-			messages: [
-				{ role: 'user', content: prompt }
-			],
-			maxTokens: 2048,
-			temperature: 0.7
-		};
-
-		console.log(`🚀 Sending ${type} request:`, {
-			sessionId: this.sessionId,
-			url: `${this.backendUrl}/completions`,
-			type: type
+			backendUrl: this.backendUrl
 		});
 
-		const timeout = this.configurationService.getValue<number>('aiCompanion.backend.timeout') || 30000;
+		return RetryUtils.retryWithExponentialBackoff(
+			async () => {
+				console.log('🔍 DEBUG callAPI retry attempt starting');
+				// TODO: Integrate with VS Code's internal language model infrastructure
+				// For now, we'll use backend API directly
 
-		try {
-			const response = await fetch(`${this.backendUrl}/completions`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Session-ID': this.sessionId
-				},
-				body: JSON.stringify(requestBody),
-				signal: AbortSignal.timeout(timeout)
-			});
+				// Fallback to backend API
+				const workspace = this.workspaceService.getWorkspace();
+				const workspaceInfo = {
+					name: workspace.folders[0]?.name || 'Unknown',
+					rootPath: workspace.folders[0]?.uri.fsPath || '',
+					files: [],
+					gitBranch: undefined
+				};
 
-			if (response.status === 401) {
-				console.warn('⚠️ Session expired during API call, recreating...');
-				await this.recreateSession();
-				
-				if (this.sessionId) {
-					requestBody.sessionId = this.sessionId;
+				const requestBody = {
+					type: type,
+					prompt: prompt,
+					context: {
+						workspace: workspaceInfo,
+						memory: null,
+						files: { files: [], directories: [], totalFiles: 0, totalSize: 0 },
+						currentMode: currentMode,
+						techStack: [],
+						architecture: '',
+						goals: []
+					},
+					sessionId: this.sessionId,
+					messages: [
+						{ role: 'user', content: prompt }
+					],
+					maxTokens: 2048,
+					temperature: 0.7
+				};
+
+				console.log(`🚀 Sending ${type} request:`, {
+					sessionId: this.sessionId,
+					url: `${this.backendUrl}/completions`,
+					type: type
+				});
+
+				const timeout = this.configurationService.getValue<number>('aiCompanion.backend.timeout') || 30000;
+
+				const response = await fetch(`${this.backendUrl}/completions`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'X-Session-ID': this.sessionId
+					},
+					body: JSON.stringify(requestBody),
+					signal: AbortSignal.timeout(timeout)
+				});
+
+				if (response.status === 401) {
+					console.warn('⚠️ Session expired during API call, recreating...');
+					await this.recreateSession();
 					
-					const retryResponse = await fetch(`${this.backendUrl}/completions`, {
-						method: 'POST',
-						headers: {
-							'Content-Type': 'application/json',
-							'X-Session-ID': this.sessionId
-						},
-						body: JSON.stringify(requestBody),
-						signal: AbortSignal.timeout(timeout)
-					});
-					
-					if (!retryResponse.ok) {
-						const errorData = await retryResponse.text();
-						throw new Error(`Backend API error (retry): ${retryResponse.status} ${errorData}`);
+					if (this.sessionId) {
+						requestBody.sessionId = this.sessionId;
+						
+						const retryResponse = await fetch(`${this.backendUrl}/completions`, {
+							method: 'POST',
+							headers: {
+								'Content-Type': 'application/json',
+								'X-Session-ID': this.sessionId
+							},
+							body: JSON.stringify(requestBody),
+							signal: AbortSignal.timeout(timeout)
+						});
+						
+						if (!retryResponse.ok) {
+							throw ErrorUtils.createNetworkError('backend API retry', retryResponse.status);
+						}
+						
+						const retryData = await retryResponse.json();
+						return retryData;
 					}
-					
-					const retryData = await retryResponse.json();
-					return retryData;
 				}
-			}
 
-			if (!response.ok) {
-				const errorData = await response.text();
-				throw new Error(`Backend API error: ${response.status} ${errorData}`);
-			}
+				if (!response.ok) {
+					throw ErrorUtils.createNetworkError('backend API', response.status);
+				}
 
-			const data = await response.json();
-			return data;
+				const data = await response.json();
+				console.log('🔍 DEBUG callAPI got response data:', {
+					data: data,
+					dataType: typeof data,
+					dataKeys: data && typeof data === 'object' ? Object.keys(data) : 'N/A',
+					dataContent: data?.content,
+					dataUsage: data?.usage,
+					dataModel: data?.model
+				});
+				return data;
 
-		} catch (error: any) {
-			if (error.name === 'AbortError') {
-				throw new Error('Request timeout');
+			},
+			{
+				maxRetries: 3,
+				baseDelay: 1000,
+				shouldRetry: (error) => ErrorUtils.isRetryableError(error)
 			}
-			throw error;
-		}
+		);
 	}
 
 	async checkStreamingEndpoint(): Promise<boolean> {

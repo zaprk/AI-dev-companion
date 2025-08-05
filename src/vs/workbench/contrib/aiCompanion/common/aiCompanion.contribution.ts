@@ -13,7 +13,7 @@ import { AIChatView } from '../browser/views/aiChatView.js';
 import { AICompanionViewIds } from './aiCompanionServiceTokens.js';
 
 // Register the AI Companion service as a singleton
-registerSingleton(IAICompanionService, AICompanionService, InstantiationType.Delayed);
+registerSingleton(IAICompanionService, AICompanionService, InstantiationType.Eager);
 
 // Register the chat view in the AI Companion container
 const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);

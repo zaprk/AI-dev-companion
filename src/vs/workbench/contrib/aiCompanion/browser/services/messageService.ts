@@ -8,7 +8,20 @@ export class MessageService {
 	private messages: IAIMessage[] = [];
 
 	addMessage(message: IAIMessage): void {
-		console.log(`📝 Adding message: ${message.type} - ${message.content.substring(0, 50)}...`);
+		// DEBUGGING: Log the raw message object
+		console.log('🔍 DEBUG addMessage called with:', {
+			message: message,
+			messageType: typeof message,
+			messageKeys: message && typeof message === 'object' ? Object.keys(message) : 'N/A',
+			messageId: message?.id,
+			messageTypeEnum: message?.type,
+			messageContent: message?.content,
+			messageContentType: typeof message?.content,
+			messageTimestamp: message?.timestamp
+		});
+
+		const contentPreview = message.content ? message.content.substring(0, 50) : '(no content)';
+		console.log(`📝 Adding message: ${message.type} - ${contentPreview}...`);
 		this.messages.push(message);
 	}
 
@@ -74,7 +87,8 @@ export class MessageService {
 		const content = append(contentContainer, $('.ai-message-text'));
 		
 		// Use the provided markdown renderer which returns an HTMLElement
-		const renderedElement = renderMarkdown(message.content);
+		const safeContent = message.content || '(no content)';
+		const renderedElement = renderMarkdown(safeContent);
 		
 		// Append the rendered element directly
 		content.appendChild(renderedElement);
@@ -106,7 +120,8 @@ export class MessageService {
 		// Render all messages with deduplication
 		const seenMessages = new Set<string>();
 		this.messages.forEach(message => {
-			const messageKey = `${message.id || message.timestamp}-${message.content.substring(0, 50)}`;
+			const contentPreview = message.content ? message.content.substring(0, 50) : '(no content)';
+			const messageKey = `${message.id || message.timestamp}-${contentPreview}`;
 			if (!seenMessages.has(messageKey)) {
 				seenMessages.add(messageKey);
 				this.renderMessage(message, messageList, renderMarkdown);
@@ -126,37 +141,57 @@ export class MessageService {
 
 	// Get error message based on error type
 	getErrorMessage(error: any): string {
-		if (error?.name === 'AbortError' || error?.message?.includes('timeout')) {
-			return 'Request timed out. The backend may be slow or unavailable.';
+		// Completely safe error handling - no property access without checks
+		try {
+			if (!error) {
+				return 'An unexpected error occurred';
+			}
+			
+			// Handle string errors
+			if (typeof error === 'string') {
+				return error;
+			}
+			
+			// Handle object errors with safe property access
+			if (typeof error === 'object') {
+				const errorObj = error as any;
+				
+				// Safe property access with explicit checks
+				const name = errorObj && typeof errorObj.name === 'string' ? errorObj.name : '';
+				const message = errorObj && typeof errorObj.message === 'string' ? errorObj.message : '';
+				
+				// Check specific error types
+				if (name === 'AbortError' || (message && message.includes('timeout'))) {
+					return 'Request timed out. The backend may be slow or unavailable.';
+				}
+				if (message && message.includes('fetch')) {
+					return 'Failed to connect to AI backend. Please check if the backend is running on localhost:3000';
+				}
+				if (message && message.includes('500')) {
+					return 'Backend server error. Please check the backend logs.';
+				}
+				if (message && message.includes('429')) {
+					return 'Rate limit exceeded. Please wait a moment before trying again.';
+				}
+				if (message && message.includes('401')) {
+					return 'Session expired. Please try again.';
+				}
+				if (message && message.includes('403')) {
+					return 'Access denied. Please check your permissions.';
+				}
+				if (message && message.includes('404')) {
+					return 'Resource not found. Please check the request.';
+				}
+				
+				// Return message or fallback
+				return message || errorObj.toString() || 'Unknown error occurred';
+			}
+			
+			// Handle other types
+			return String(error);
+		} catch (parseError) {
+			// If even error parsing fails, return a safe message
+			return 'An unexpected error occurred';
 		}
-		if (error?.message?.includes('fetch')) {
-			return 'Failed to connect to AI backend. Please check if the backend is running on localhost:3000';
-		}
-		if (error?.message?.includes('500')) {
-			return 'Backend server error. Please check the backend logs.';
-		}
-		if (error?.message?.includes('429')) {
-			return 'Rate limit exceeded. Please wait a moment before trying again.';
-		}
-		if (error?.message?.includes('401')) {
-			return 'Session expired. Please try again.';
-		}
-		if (error?.message?.includes('403')) {
-			return 'Access denied. Please check your permissions.';
-		}
-		if (error?.message?.includes('404')) {
-			return 'Resource not found. Please check the request.';
-		}
-		
-		// Generic error handling
-		if (typeof error === 'string') {
-			return error;
-		}
-		if (error && typeof error === 'object') {
-			const errorObj = error as any;
-			return errorObj.message || errorObj.toString() || 'Unknown error occurred';
-		}
-		
-		return 'An unexpected error occurred';
 	}
 }

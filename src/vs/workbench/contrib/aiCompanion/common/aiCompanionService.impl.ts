@@ -28,6 +28,12 @@ import { AICompanionFiles } from './aiCompanionServiceTokens.js';
 import { IAIProvider } from './ai/aiProvider.js';
 // import { aiProviderFactory } from './ai/aiProviderFactory.js';
 
+// Import new utilities
+import { 
+	ContextWindowUtils, 
+	ErrorUtils 
+} from '../browser/utils/index.js';
+
 const PROJECT_MEMORY_SCHEMA = {
 	type: 'object',
 	properties: {
@@ -95,13 +101,35 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 	private aiProvider: IAIProvider | undefined;
 
 	constructor(
-		workspaceService: IWorkspaceContextService,
-		fileService: IFileService,
-		logService: ILogService,
-		instantiationService: IInstantiationService,
-		configurationService: IConfigurationService
+		@IWorkspaceContextService workspaceService: IWorkspaceContextService,
+		@IFileService fileService: IFileService,
+		@ILogService logService: ILogService,
+		@IInstantiationService instantiationService: IInstantiationService,
+		@IConfigurationService configurationService: IConfigurationService
 	) {
 		super();
+
+		console.log('🔍 DEBUG AICompanionService constructor called with dependencies:', {
+			workspaceService: !!workspaceService,
+			fileService: !!fileService,
+			logService: !!logService,
+			instantiationService: !!instantiationService,
+			configurationService: !!configurationService
+		});
+
+		// Safety checks for required services
+		if (!workspaceService) {
+			throw new Error('WorkspaceService is required');
+		}
+		if (!fileService) {
+			throw new Error('FileService is required');
+		}
+		if (!logService) {
+			throw new Error('LogService is required');
+		}
+		if (!configurationService) {
+			throw new Error('ConfigurationService is required');
+		}
 
 		this.workspaceService = workspaceService;
 		this.fileService = fileService;
@@ -120,6 +148,7 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 		this._register(this.fileSystemManager);
 
+		console.log('🔍 DEBUG AICompanionService constructor - about to initialize AI provider');
 		this.initializeAIProvider();
 		
 		this._register(configurationService.onDidChangeConfiguration((e: any) => {
@@ -131,6 +160,13 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 	private initializeAIProvider(): void {
 		try {
+			// Safety check for logService
+			if (!this.logService) {
+				console.warn('LogService not available during AI provider initialization');
+				this.aiProvider = undefined;
+				return;
+			}
+
 			const aiConfig = this.configurationService.getValue('aiCompanion.ai');
 			
 			if (aiConfig && typeof aiConfig === 'object') {
@@ -159,7 +195,13 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
 				}
 			}
-			this.logService.error('Failed to initialize AI provider:', errorMessage);
+			
+			// Safety check before using logService
+			if (this.logService) {
+				this.logService.error('Failed to initialize AI provider:', errorMessage);
+			} else {
+				console.error('Failed to initialize AI provider (logService unavailable):', errorMessage);
+			}
 			this.aiProvider = undefined;
 		}
 	}
@@ -245,22 +287,27 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 			await this.loadExistingConversations();
 
+			// Try to restore session state if available
+			try {
+				// Note: We need to inject ExtensionContext to use SessionPersistenceUtils
+				// For now, we'll use the existing file-based persistence
+				this.logService.info('Session persistence ready (file-based)');
+			} catch (persistenceError) {
+				ErrorUtils.logError(persistenceError as Error, 'session persistence initialization');
+				// Continue without session persistence
+			}
+
 			this._isInitialized = true;
 			this.logService.info('AI Companion Service initialized successfully');
 
 		} catch (error: unknown) {
-			// Safe error handling
-			let errorMessage = 'Unknown error';
-			if (error) {
-				if (typeof error === 'string') {
-					errorMessage = error;
-				} else if (typeof error === 'object' && error !== null) {
-					const errorObj = error as any;
-					errorMessage = errorObj.message || errorObj.toString() || 'Unknown error';
-				}
-			}
-			this.logService.error('Failed to initialize AI Companion Service:', errorMessage);
-			throw new Error(errorMessage);
+			ErrorUtils.logError(error as Error, 'service initialization');
+			throw ErrorUtils.createError(
+				ErrorUtils.getInternalErrorCode(),
+				'Failed to initialize AI Companion Service',
+				{ workspaceUri: workspaceUri.toString() },
+				error as Error
+			);
 		}
 	}
 
@@ -365,28 +412,57 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		this.ensureInitialized();
 
 		if (!this._currentConversation) {
-			throw new Error('No active conversation');
+			throw ErrorUtils.createError(
+				ErrorUtils.getInvalidInputErrorCode(),
+				'No active conversation'
+			);
 		}
 
-		const message: IAIMessage = {
+		try {
+			// Check context window and prune if needed
+			const currentTokens = ContextWindowUtils.estimateTokenCount(
+				this._currentConversation.messages.map(m => m.content).join(' ')
+			);
+			
+			const boundaries = ContextWindowUtils.detectTokenBoundaries(currentTokens);
+			if (boundaries.recommendedAction === 'prune') {
+				this.logService.warn(`Context window approaching limit (${currentTokens} tokens), pruning...`);
+				const prunedMessages = ContextWindowUtils.pruneContextToFitWindow(
+					this._currentConversation.messages,
+					8000, // Safe limit
+					'You are an AI coding assistant.'
+				);
+				this._currentConversation.messages = prunedMessages;
+			}
+
+					const message: IAIMessage = {
 			id: generateUuid(),
 			type: MessageType.User,
 			content: content,
 			timestamp: Date.now(),
-			metadata: files ? { files: files.map(f => f.toString()) } : undefined
+			metadata: files ? { files: files.map(f => f.toString()) } : {}
 		};
 
-		this._currentConversation.messages.push(message);
-		this._currentConversation.lastModified = Date.now();
+			this._currentConversation.messages.push(message);
+			this._currentConversation.lastModified = Date.now();
 
-		this.conversations.set(this._currentConversation.id, this._currentConversation);
+			this.conversations.set(this._currentConversation.id, this._currentConversation);
 
-		await this.saveConversation(this._currentConversation);
+			await this.saveConversation(this._currentConversation);
 
-		this._onDidChangeConversation.fire(this._currentConversation);
+			// TODO: Integrate with VS Code's internal language model infrastructure
+			// For now, we'll skip AI response generation until we implement proper native integration
+			this.logService.info('AI response generation skipped - needs native VS Code integration');
 
-		this.logService.debug(`Message sent in conversation ${this._currentConversation.id}`);
-		return message;
+			this._onDidChangeConversation.fire(this._currentConversation);
+
+			this.logService.debug(`Message sent in conversation ${this._currentConversation.id}`);
+			return message;
+
+		} catch (error) {
+			ErrorUtils.logError(error as Error, 'sendMessage');
+			throw error;
+		}
 	}
 
 	async getMessages(conversationId?: string): Promise<IAIMessage[]> {

@@ -1,3 +1,9 @@
+// Import new utilities
+import { 
+	StreamingErrorUtils, 
+	ErrorUtils 
+} from '../utils/index.js';
+
 export class StreamingResponseParser {
 	private buffer: string = '';
 	private isComplete: boolean = false;
@@ -24,11 +30,8 @@ export class StreamingResponseParser {
 				
 				try {
 					const parsed = JSON.parse(data);
-					if (parsed.content) {
+					if (parsed && typeof parsed === 'object' && parsed.content) {
 						content += parsed.content;
-					}
-					if (parsed.error) {
-						throw new Error(parsed.error);
 					}
 				} catch (parseError) {
 					// If it's not JSON, treat as plain text
@@ -65,16 +68,36 @@ export class StreamingResponseService {
 		formatCallback: (content: string, workflowType: string, isFinal?: boolean) => string,
 		renderCallback: (content: string) => HTMLElement
 	): Promise<void> {
-		const reader = response.body?.getReader();
-		const decoder = new TextDecoder();
-		const parser = new StreamingResponseParser();
+		const streamId = `stream-${Date.now()}`;
 		
-		let accumulatedContent = '';
-		let lastUpdateTime = 0;
-
-		console.log('🌊 Starting enhanced streaming response processing...');
-
 		try {
+			// Create resilient stream
+			const resilientStream = await StreamingErrorUtils.createResilientStream(
+				streamId,
+				() => Promise.resolve(response),
+				{
+					maxRetries: 3,
+					onError: (error, retryCount) => {
+						console.warn(`Stream error (attempt ${retryCount}):`, error);
+						const errorMessage = ErrorUtils.getErrorMessage(error);
+						this.updateStreamingContent(contentElement, renderCallback(`⚠️ ${errorMessage}`));
+					},
+					onRecovery: (retryCount) => {
+						console.log(`Stream recovered after ${retryCount} retries`);
+						this.updateStreamingContent(contentElement, renderCallback(`🔄 Recovered after ${retryCount} retries...`));
+					}
+				}
+			);
+
+			const reader = resilientStream.getReader();
+			const decoder = new TextDecoder();
+			const parser = new StreamingResponseParser();
+			
+			let accumulatedContent = '';
+			let lastUpdateTime = 0;
+
+			console.log('🌊 Starting enhanced streaming response processing...');
+
 			while (reader) {
 				const { done, value } = await reader.read();
 				if (done) break;
@@ -98,23 +121,23 @@ export class StreamingResponseService {
 				}
 				
 				if (parseResult.isComplete) {
-					console.log('🌊 Streaming marked as complete');
 					break;
 				}
 			}
 
-			// Final update with complete formatted content
-			const finalContent = formatCallback(accumulatedContent, workflowType, true);
-			this.updateStreamingContent(contentElement, renderCallback(finalContent));
+			// Final update with complete content
+			const finalFormatted = formatCallback(accumulatedContent, workflowType, true);
+			this.updateStreamingContent(contentElement, renderCallback(finalFormatted));
 			
-			console.log('🌊 Enhanced streaming processing complete');
-			
+			console.log('✅ Streaming response completed successfully');
+
 		} catch (error) {
-			console.error('❌ Enhanced streaming error:', error);
-			throw error;
+			ErrorUtils.logError(error as Error, 'streaming response processing');
+			const errorMessage = ErrorUtils.getErrorMessage(error);
+			this.updateStreamingContent(contentElement, renderCallback(`❌ ${errorMessage}`));
 		} finally {
-			reader?.releaseLock();
-			parser.reset();
+			// Clean up stream
+			StreamingErrorUtils.cancelStream(streamId);
 		}
 	}
 

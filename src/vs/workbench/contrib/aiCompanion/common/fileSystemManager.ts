@@ -121,7 +121,10 @@ class FileSystemManager {
             if (schema) {
                 const validation = this.validationUtils.validateJsonSchema(data, schema);
                 if (!validation.isValid) {
-                    throw new Error(`JSON validation failed: ${validation.errors.join(', ')}`);
+                    const errorMessages = validation.errors && Array.isArray(validation.errors) 
+                        ? validation.errors.join(', ') 
+                        : 'Unknown validation error';
+                    throw new Error(`JSON validation failed: ${errorMessages}`);
                 }
                 return validation.data as T;
             }
@@ -139,7 +142,10 @@ class FileSystemManager {
         if (schema) {
             const validation = this.validationUtils.validateJsonSchema(data, schema);
             if (!validation.isValid) {
-                throw new Error(`JSON validation failed: ${validation.errors.join(', ')}`);
+                const errorMessages = validation.errors && Array.isArray(validation.errors) 
+                    ? validation.errors.join(', ') 
+                    : 'Unknown validation error';
+                throw new Error(`JSON validation failed: ${errorMessages}`);
             }
         }
 
@@ -427,7 +433,10 @@ class FileSystemManager {
                 }
 
             } catch (error: any) {
-                this.logService.error(`Error handling file change: ${error.message}`);
+                const errorMessage = error && typeof error === 'object' && error.message 
+                    ? error.message 
+                    : 'Unknown file change error';
+                this.logService.error(`Error handling file change: ${errorMessage}`);
             }
         }, this.config.debounceDelay);
     }
@@ -450,7 +459,10 @@ class FileSystemManager {
                 const jitter = Math.random() * delay * 0.1;
                 const totalDelay = delay + jitter;
 
-                this.logService.warn(`Operation failed, retrying in ${totalDelay}ms: ${error.message}`);
+                const errorMessage = error && typeof error === 'object' && error.message 
+                    ? error.message 
+                    : 'Unknown operation error';
+                this.logService.warn(`Operation failed, retrying in ${totalDelay}ms: ${errorMessage}`);
                 await this.sleep(totalDelay);
             }
         }
@@ -460,7 +472,8 @@ class FileSystemManager {
 
     private isRetryableError(error: any): boolean {
         const retryableCodes = ['EBUSY', 'EMFILE', 'ENFILE', 'ENOENT', 'EAGAIN'];
-        return retryableCodes.includes(error.code);
+        const errorCode = error && typeof error === 'object' && error.code ? error.code : '';
+        return retryableCodes.includes(errorCode);
     }
 
     private async cleanupStaleLocks(): Promise<void> {

@@ -16,7 +16,8 @@ import { MarkdownRenderer } from '../../../../../editor/browser/widget/markdownR
 import { MarkdownString } from '../../../../../base/common/htmlContent.js';
 
 // Import our new services
-import { BackendCommunicationService, IBackendCommunicationService } from '../services/backendCommunicationService.js';
+import { IBackendCommunicationService } from '../services/backendCommunicationService.js';
+import { MockBackendCommunicationService } from '../services/mockBackendCommunicationService.js';
 import { StreamingResponseService } from '../services/streamingResponseService.js';
 import { WorkflowDetectionService, WorkflowFormattingService, WorkflowType } from '../services/workflowService.js';
 import { ResponseCachingService } from '../services/cachingService.js';
@@ -25,6 +26,12 @@ import { ContextService } from '../services/contextService.js';
 import { ConnectionPoolService } from '../services/connectionPoolService.js';
 import { UIService } from '../services/uiService.js';
 import { MessageService } from '../services/messageService.js';
+
+// Import new utilities
+import { 
+	ContextWindowUtils, 
+	ErrorUtils 
+} from '../utils/index.js';
 
 /**
  * AIChatView - Clean separation of concerns
@@ -46,6 +53,7 @@ export class AIChatView extends ViewPane {
 
 	// Core services
 	private readonly aiCompanionService: IAICompanionService;
+	private readonly workspaceService: IWorkspaceContextService;
 
 	// Specialized services
 	private readonly backendService: IBackendCommunicationService;
@@ -81,9 +89,10 @@ export class AIChatView extends ViewPane {
 
 		// Initialize core services
 		this.aiCompanionService = aiCompanionService;
+		this.workspaceService = workspaceService;
 
 		// Initialize specialized services
-		this.backendService = new BackendCommunicationService(workspaceService, configurationService);
+		this.backendService = new MockBackendCommunicationService(workspaceService, configurationService);
 		this.streamingService = new StreamingResponseService();
 		this.workflowDetector = new WorkflowDetectionService();
 		this.workflowFormatter = new WorkflowFormattingService();
@@ -146,6 +155,17 @@ export class AIChatView extends ViewPane {
 
 	private async initializeServices(): Promise<void> {
 		try {
+			// Initialize AI Companion service first
+			const workspace = this.workspaceService.getWorkspace();
+			if (workspace.folders.length > 0) {
+				const workspaceUri = workspace.folders[0].uri;
+				console.log('🔍 DEBUG Initializing AI Companion service with workspace:', workspaceUri.toString());
+				await this.aiCompanionService.initialize(workspaceUri);
+				console.log('✅ AI Companion service initialized successfully');
+			} else {
+				console.warn('⚠️ No workspace folders found, cannot initialize AI Companion service');
+			}
+
 			// Initialize backend service
 			await this.backendService.initialize();
 
@@ -183,21 +203,49 @@ export class AIChatView extends ViewPane {
 			return;
 		}
 
-		// Clear input and add user message
-		this.inputBox.value = '';
-		this.updateSendButton();
-		
-		const userMessage = this.messageService.createUserMessage(content);
-		this.addMessage(userMessage);
+		try {
+			// Check context window before sending
+			const messages = await this.aiCompanionService.getMessages();
+			const currentTokens = ContextWindowUtils.estimateTokenCount(
+				messages.map(m => m.content).join(' ')
+			);
+			
+			const boundaries = ContextWindowUtils.detectTokenBoundaries(currentTokens);
+			if (boundaries.recommendedAction === 'prune') {
+				console.warn(`⚠️ Context window approaching limit (${currentTokens} tokens)`);
+				// Show warning to user
+				this.showError('Conversation is getting long. Consider starting a new chat for better performance.');
+			}
 
-		// Detect workflow type
-		const workflowType: WorkflowType = this.workflowDetector.detectWorkflowType(content);
-		console.log('🔍 Detected workflow type:', workflowType);
-		
-		if (workflowType !== 'chat') {
-			await this.handleStructuredWorkflow(workflowType, content);
-		} else {
-			await this.handleChatMessage(content);
+			// Clear input and add user message
+			this.inputBox.value = '';
+			this.updateSendButton();
+			
+			const userMessage = this.messageService.createUserMessage(content);
+			this.addMessage(userMessage);
+
+			// Detect workflow type
+			const workflowType: WorkflowType = this.workflowDetector.detectWorkflowType(content);
+			console.log('🔍 Detected workflow type:', workflowType);
+			
+			if (workflowType !== 'chat') {
+				await this.handleStructuredWorkflow(workflowType, content);
+			} else {
+				await this.handleChatMessage(content);
+			}
+
+		} catch (error) {
+			console.log('🔍 DEBUG sendMessage caught error:', {
+				error: error,
+				errorType: typeof error,
+				errorConstructor: error?.constructor?.name,
+				errorMessage: error?.message,
+				errorName: error?.name,
+				errorStack: error?.stack?.substring(0, 200) + '...'
+			});
+			ErrorUtils.logError(error as Error, 'sendMessage');
+			const errorMessage = ErrorUtils.getErrorMessage(error as Error);
+			this.showError(errorMessage);
 		}
 	}
 
@@ -396,7 +444,15 @@ export class AIChatView extends ViewPane {
 		this.uiService.showTypingIndicator();
 		
 		try {
+			console.log('🔍 DEBUG handleChatMessage calling backendService.callAPI');
 			const response = await this.backendService.callAPI('chat', content, this.currentMode);
+			console.log('🔍 DEBUG handleChatMessage got response:', {
+				response: response,
+				responseType: typeof response,
+				responseKeys: response && typeof response === 'object' ? Object.keys(response) : 'N/A',
+				responseContent: response?.content,
+				responseUsage: response?.usage
+			});
 			
 			const aiMessage = this.messageService.createAssistantMessage(
 				response.content,
@@ -410,6 +466,14 @@ export class AIChatView extends ViewPane {
 			
 			this.addMessage(aiMessage);
 		} catch (error) {
+			console.log('🔍 DEBUG handleChatMessage caught error:', {
+				error: error,
+				errorType: typeof error,
+				errorConstructor: error?.constructor?.name,
+				errorMessage: error?.message,
+				errorName: error?.name,
+				errorStack: error?.stack?.substring(0, 200) + '...'
+			});
 			console.error('Failed to send message:', error);
 			this.showError(this.messageService.getErrorMessage(error));
 		} finally {

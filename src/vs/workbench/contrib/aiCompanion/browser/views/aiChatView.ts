@@ -2,7 +2,7 @@ import { Emitter, Event } from '../../../../../base/common/event.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
-import { IAICompanionService, IAIMessage, AICompanionMode } from '../../common/aiCompanionService.js';
+import { IAICompanionService, AICompanionMode } from '../../common/aiCompanionService.js';
 import { ViewPane, IViewPaneOptions } from '../../../../browser/parts/views/viewPane.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -12,10 +12,14 @@ import { IContextMenuService } from '../../../../../platform/contextview/browser
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { localize } from '../../../../../nls.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
+// Removed markdown renderer imports to avoid disposal issues
+import { append, $ } from '../../../../../base/browser/dom.js';
+import { safeSetInnerHtml } from '../../../../../base/browser/domSanitize.js';
 import { MarkdownRenderer } from '../../../../../editor/browser/widget/markdownRenderer/browser/markdownRenderer.js';
-import { MarkdownString } from '../../../../../base/common/htmlContent.js';
+import { IMarkdownString } from '../../../../../base/common/htmlContent.js';
+import { ILanguageService } from '../../../../../editor/common/languages/language.js';
 
-// Import our new services
+// Import our services
 import { IBackendCommunicationService } from '../services/backendCommunicationService.js';
 import { MockBackendCommunicationService } from '../services/mockBackendCommunicationService.js';
 import { StreamingResponseService } from '../services/streamingResponseService.js';
@@ -27,17 +31,17 @@ import { ConnectionPoolService } from '../services/connectionPoolService.js';
 import { UIService } from '../services/uiService.js';
 import { MessageService } from '../services/messageService.js';
 
-// Import new utilities
+// Import utilities
 import { 
 	ContextWindowUtils, 
 	ErrorUtils 
 } from '../utils/index.js';
 
 /**
- * AIChatView - Clean separation of concerns
+ * Modern AIChatView - Rune/Cursor Style Interface
  * 
- * This view is focused ONLY on orchestrating services and handling user interactions.
- * All business logic is delegated to specialized services.
+ * This view creates a modern chat interface similar to Cursor AI or Claude,
+ * with floating input, workflow indicators, and clean messaging.
  */
 export class AIChatView extends ViewPane {
 	static readonly ID = 'aiCompanion.chatView';
@@ -48,12 +52,14 @@ export class AIChatView extends ViewPane {
 	// UI Elements
 	private messageList!: HTMLElement;
 	private inputContainer!: HTMLElement;
-	private inputBox!: HTMLInputElement;
+	private inputBox!: HTMLTextAreaElement;
 	private sendButton!: HTMLButtonElement;
+	private welcomeScreen!: HTMLElement;
 
 	// Core services
 	private readonly aiCompanionService: IAICompanionService;
 	private readonly workspaceService: IWorkspaceContextService;
+	private readonly markdownRenderer: MarkdownRenderer;
 
 	// Specialized services
 	private readonly backendService: IBackendCommunicationService;
@@ -63,13 +69,14 @@ export class AIChatView extends ViewPane {
 	private readonly cachingService: ResponseCachingService;
 	private readonly contextService: ContextService;
 	private readonly connectionPool: ConnectionPoolService;
-	private readonly markdownRenderer: MarkdownRenderer;
+	// Removed markdownRenderer property to avoid disposal issues
 	private readonly uiService: UIService;
 	private readonly messageService: MessageService;
 
 	// State
 	private currentMode: AICompanionMode = AICompanionMode.Builder;
 	private streamingEnabled: boolean = true;
+	private isGenerating: boolean = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -95,11 +102,14 @@ export class AIChatView extends ViewPane {
 		this.backendService = new MockBackendCommunicationService(workspaceService, configurationService);
 		this.streamingService = new StreamingResponseService();
 		this.workflowDetector = new WorkflowDetectionService();
+		
+		// Initialize markdown renderer
+		this.markdownRenderer = new MarkdownRenderer({}, instantiationService.invokeFunction(accessor => accessor.get(ILanguageService)), openerService);
 		this.workflowFormatter = new WorkflowFormattingService();
 		this.cachingService = new ResponseCachingService();
 		this.contextService = new ContextService(workspaceService);
 		this.connectionPool = new ConnectionPoolService();
-		this.markdownRenderer = instantiationService.createInstance(MarkdownRenderer, {});
+		// Removed markdown renderer initialization to avoid disposal issues
 		this.uiService = new UIService();
 		this.messageService = new MessageService();
 
@@ -127,12 +137,9 @@ export class AIChatView extends ViewPane {
 		this.messageList = layout.messageList;
 		this.inputContainer = layout.inputContainer;
 
-		// Create mode selector
-		this.uiService.createModeSelector(
-			container.querySelector('.ai-chat-header')!,
-			this.currentMode,
-			(mode) => this.setMode(mode)
-		);
+		// Show welcome message first
+		this.uiService.showWelcomeMessage(this.messageList);
+		this.welcomeScreen = this.messageList.querySelector('.welcome-screen') as HTMLElement;
 
 		// Create input controls
 		const inputControls = this.uiService.createInputContainer(
@@ -146,11 +153,39 @@ export class AIChatView extends ViewPane {
 		this.inputBox = inputControls.inputBox;
 		this.sendButton = inputControls.sendButton;
 
-		// Show welcome message
-		this.uiService.showWelcomeMessage(this.messageList);
+		// Connect suggestion cards to the input system
+		this.connectSuggestionCards();
 
 		// Initial UI update
 		this.updateSendButton();
+	}
+
+	private connectSuggestionCards(): void {
+		// Find all suggestion cards and connect them to the input
+		const suggestionCards = this.messageList.querySelectorAll('.suggestion-card');
+		suggestionCards.forEach((card, index) => {
+			const suggestions = [
+				'Build a user authentication system',
+				'Create a REST API for a blog',
+				'Build a React dashboard', 
+				'Set up CI/CD pipeline'
+			];
+			
+			card.addEventListener('click', () => {
+				this.sendSuggestion(suggestions[index]);
+			});
+		});
+	}
+
+	private sendSuggestion(text: string): void {
+		this.inputBox.value = text;
+		this.inputBox.style.height = 'auto';
+		this.inputBox.style.height = Math.min(this.inputBox.scrollHeight, 120) + 'px';
+		this.updateSendButton();
+		this.inputBox.focus();
+		
+		// Trigger the send
+		setTimeout(() => this.sendMessage(), 100);
 	}
 
 	private async initializeServices(): Promise<void> {
@@ -204,6 +239,11 @@ export class AIChatView extends ViewPane {
 		}
 
 		try {
+			// Hide welcome screen on first message
+			if (this.welcomeScreen && this.welcomeScreen.style.display !== 'none') {
+				this.welcomeScreen.style.display = 'none';
+			}
+
 			// Check context window before sending
 			const messages = await this.aiCompanionService.getMessages();
 			const currentTokens = ContextWindowUtils.estimateTokenCount(
@@ -213,44 +253,59 @@ export class AIChatView extends ViewPane {
 			const boundaries = ContextWindowUtils.detectTokenBoundaries(currentTokens);
 			if (boundaries.recommendedAction === 'prune') {
 				console.warn(`⚠️ Context window approaching limit (${currentTokens} tokens)`);
-				// Show warning to user
 				this.showError('Conversation is getting long. Consider starting a new chat for better performance.');
 			}
 
 			// Clear input and add user message
 			this.inputBox.value = '';
+			this.inputBox.style.height = 'auto';
 			this.updateSendButton();
 			
-			const userMessage = this.messageService.createUserMessage(content);
-			this.addMessage(userMessage);
+			// Add user message with modern styling
+			this.addUserMessage(content);
 
 			// Detect workflow type
 			const workflowType: WorkflowType = this.workflowDetector.detectWorkflowType(content);
 			console.log('🔍 Detected workflow type:', workflowType);
 			
-			if (workflowType !== 'chat') {
+			// Set generating state
+			this.isGenerating = true;
+			this.updateSendButton();
+
+			if (workflowType !== 'chat' && this.isWorkflowRequest(content)) {
 				await this.handleStructuredWorkflow(workflowType, content);
 			} else {
 				await this.handleChatMessage(content);
 			}
 
 		} catch (error) {
-			console.log('🔍 DEBUG sendMessage caught error:', {
-				error: error,
-				errorType: typeof error,
-				errorConstructor: error?.constructor?.name,
-				errorMessage: error?.message,
-				errorName: error?.name,
-				errorStack: error?.stack?.substring(0, 200) + '...'
-			});
+			console.log('🔍 DEBUG sendMessage caught error:', error);
 			ErrorUtils.logError(error as Error, 'sendMessage');
 			const errorMessage = ErrorUtils.getErrorMessage(error as Error);
 			this.showError(errorMessage);
+		} finally {
+			this.isGenerating = false;
+			this.updateSendButton();
 		}
+	}
+
+	private isWorkflowRequest(content: string): boolean {
+		const lowerContent = content.toLowerCase();
+		return (
+			lowerContent.includes('build') || 
+			lowerContent.includes('create') || 
+			lowerContent.includes('auth') || 
+			lowerContent.includes('api') || 
+			lowerContent.includes('dashboard') ||
+			lowerContent.includes('pipeline')
+		);
 	}
 
 	private async handleStructuredWorkflow(workflowType: WorkflowType, content: string): Promise<void> {
 		console.log(`🚀 Starting structured workflow: ${workflowType}`);
+		
+		// Show workflow progress
+		this.uiService.showWorkflowProgress(this.messageList);
 		
 		// For Builder mode, automatically continue through all steps
 		if (this.currentMode === AICompanionMode.Builder && workflowType === 'requirements') {
@@ -259,13 +314,19 @@ export class AIChatView extends ViewPane {
 			// Use streaming for better user experience
 			await this.handleStreamingWorkflow(workflowType, content);
 		}
+		
+
 	}
 
 	private async handleFullBuilderWorkflow(content: string): Promise<void> {
 		console.log('🔨 Builder mode - starting sequential workflow');
 		
+		// Show workflow progress at the start
+		this.uiService.showWorkflowProgress(this.messageList);
+		this.uiService.resetWorkflowProgress();
+		
 		try {
-			// Step 1: Generate requirements
+			// Step 1: Generate requirements with smooth progress
 			console.log('📋 Step 1: Generating requirements...');
 			const requirementsResponse = await this.handleStreamingWorkflow('requirements', content);
 			
@@ -273,6 +334,9 @@ export class AIChatView extends ViewPane {
 				console.error('❌ Requirements generation failed, stopping workflow');
 				return;
 			}
+			
+			// Brief pause between steps for visual clarity
+			await this.delay(500);
 			
 			// Step 2: Generate design
 			console.log('🏗️ Step 2: Generating design...');
@@ -284,6 +348,8 @@ export class AIChatView extends ViewPane {
 				return;
 			}
 			
+			await this.delay(500);
+			
 			// Step 3: Generate tasks
 			console.log('📝 Step 3: Generating tasks...');
 			const tasksResponse = await this.handleStreamingWorkflow('tasks', 
@@ -294,6 +360,8 @@ export class AIChatView extends ViewPane {
 				return;
 			}
 			
+			await this.delay(500);
+			
 			// Step 4: Generate code
 			console.log('💻 Step 4: Generating code...');
 			await this.handleStreamingWorkflow('code', 
@@ -301,20 +369,42 @@ export class AIChatView extends ViewPane {
 			
 			console.log('✅ Full workflow complete');
 			
+			// Optional: Hide workflow progress after completion with delay
+			setTimeout(() => {
+				this.uiService.hideWorkflowProgress();
+			}, 3000);
+			
 		} catch (error) {
 			console.error('Full workflow failed:', error);
 			this.showError(`Workflow failed: ${this.messageService.getErrorMessage(error)}`);
 		}
 	}
+	// Removed generateMockResponse as it's not being used
 
 	private async handleStreamingWorkflow(workflowType: WorkflowType, content: string): Promise<any> {
+		this.isGenerating = true;
+		this.updateSendButton();
+		
 		const endTimer = PerformanceMonitoringService.startTimer(`${workflowType}-workflow`);
 		
 		try {
+			// Show workflow progress and reset for smooth animation
+			if (workflowType === 'requirements' && this.currentMode === AICompanionMode.Builder) {
+				this.uiService.showWorkflowProgress(this.messageList);
+				this.uiService.resetWorkflowProgress();
+			}
+			console.log(`🔍 DEBUG handleStreamingWorkflow called with:`, {
+				workflowType,
+				contentLength: content.length,
+				streamingEnabled: this.streamingEnabled,
+				isConnected: this.backendService.isSessionConnected()
+			});
+
 			// Check cache first
 			const cacheKey = this.cachingService.getCacheKey(workflowType, content);
 			const cached = await this.cachingService.getFromCache(cacheKey);
 			if (cached) {
+				console.log(`✅ Using cached content for ${workflowType}`);
 				const cachedMessage = this.messageService.createAssistantMessage(
 					`🧠 **Generated ${workflowType}** (Cached)\n\n${cached.content}`
 				);
@@ -325,16 +415,59 @@ export class AIChatView extends ViewPane {
 
 			// Check connection pool
 			if (!this.connectionPool.canMakeRequest()) {
+				console.log('❌ Connection pool limit reached');
 				this.showError('Too many concurrent requests. Please wait a moment.');
 				endTimer();
 				return null;
 			}
 
+
+			
+			// Hide thinking indicator since we're starting streaming
+			this.uiService.hideThinkingIndicator();
+			
 			// Create streaming message
+			console.log('📝 Creating streaming message...');
 			const streamingMessage = this.messageService.createStreamingMessage(workflowType);
+			console.log('🔍 DEBUG Streaming message created:', {
+				id: streamingMessage.id,
+				type: streamingMessage.type,
+				content: streamingMessage.content?.substring(0, 50)
+			});
+			
 			this.addMessage(streamingMessage);
-			const messageElement = this.uiService.getMessageElement(this.messageList, streamingMessage.id);
-			const contentElement = messageElement?.querySelector('.ai-message-text') as HTMLElement;
+			
+			// Wait a bit for DOM to update
+			await new Promise(resolve => setTimeout(resolve, 10));
+			
+			const messageElement = this.getMessageElement(this.messageList, streamingMessage.id);
+			const contentElement = messageElement?.querySelector('.message-content') as HTMLElement;
+			
+			console.log('🔍 DEBUG Message element found:', {
+				messageElement: !!messageElement,
+				contentElement: !!contentElement,
+				messageId: streamingMessage.id,
+				messageListChildren: this.messageList.children.length
+			});
+			
+			// If we can't find the element, try to find it by class
+			if (!contentElement) {
+				console.log('🔍 DEBUG Trying alternative element search...');
+				const allMessages = this.messageList.querySelectorAll('.message.assistant');
+				console.log('🔍 DEBUG Found assistant messages:', allMessages.length);
+				
+				if (allMessages.length > 0) {
+					const lastMessage = allMessages[allMessages.length - 1] as HTMLElement;
+					const altContentElement = lastMessage.querySelector('.message-content') as HTMLElement;
+					console.log('🔍 DEBUG Alternative content element:', !!altContentElement);
+					
+					if (altContentElement) {
+						// Use the alternative element
+						console.log('✅ Using alternative content element');
+						return this.handleStreamingWorkflowWithElement(workflowType, content, altContentElement, endTimer, cacheKey);
+					}
+				}
+			}
 
 			// Get connection and context
 			const connectionId = this.connectionPool.getConnectionId(workflowType);
@@ -347,18 +480,48 @@ export class AIChatView extends ViewPane {
 					console.log('🚀 Attempting streaming request...');
 					const response = await this.backendService.createStreamingRequest(workflowType, content, context);
 
-					if (response.ok) {
-						// Process streaming response
-						await this.streamingService.processStreamingResponse(
-							response,
-							contentElement,
-							workflowType,
-							(content, type, isFinal) => this.workflowFormatter.formatStreamingContent(content, type as WorkflowType, isFinal),
-							(content) => this.renderMarkdownContent(content)
-						);
+					console.log('🔍 DEBUG Streaming response received:', {
+						ok: response.ok,
+						status: response.status,
+						statusText: response.statusText,
+						headers: Object.fromEntries(response.headers.entries())
+					});
+
+									if (response.ok) {
+					console.log('✅ Streaming response OK, processing...');
+					
+					// Start independent progress animation
+					const stepIndex = this.getStepIndex(workflowType);
+					this.uiService.startIndependentProgress(stepIndex); // Use default 25 second duration
+					
+					// Process streaming response
+					await this.streamingService.processStreamingResponse(
+						response,
+						contentElement,
+						workflowType,
+						(content, type, isFinal) => {
+							// For code generation, format as file content
+							if (workflowType === 'code') {
+								return this.formatCodeGeneration(content, type as WorkflowType, isFinal);
+							}
+							return this.workflowFormatter.formatStreamingContent(content, type as WorkflowType, isFinal);
+						},
+						(content) => this.renderMarkdownContent(content)
+					);
+					
+					// Complete the progress when streaming ends
+					this.uiService.completeProgress(stepIndex);
 						
 						// Cache the content
 						const finalContent = contentElement?.textContent || contentElement?.innerHTML || '';
+						console.log('💾 Caching final content, length:', finalContent.length);
+						console.log('🔍 DEBUG Final content preview:', finalContent.substring(0, 100));
+						
+						if (!finalContent || finalContent.trim().length === 0) {
+							console.error('❌ Final content is empty, this indicates a streaming processing issue');
+							throw new Error('Streaming response produced empty content');
+						}
+						
 						this.cachingService.setCache(cacheKey, { content: finalContent });
 						endTimer();
 						return finalContent;
@@ -368,11 +531,23 @@ export class AIChatView extends ViewPane {
 				}
 
 				// Fallback to regular API
+				console.log('🔄 Falling back to regular API...');
 				const fallbackResult = await this.handleStreamingFallback(workflowType, content, contentElement);
+				console.log('🔍 DEBUG Fallback result:', {
+					hasResult: !!fallbackResult,
+					resultType: typeof fallbackResult,
+					resultLength: fallbackResult ? fallbackResult.length : 0
+				});
 				endTimer();
 				return fallbackResult;
 
 			} catch (error: any) {
+				console.log('🔍 DEBUG Streaming error caught:', {
+					errorName: error.name,
+					errorMessage: error.message,
+					errorStack: error.stack
+				});
+				
 				if (error.name === 'AbortError') {
 					console.log('Request was aborted');
 				} else {
@@ -386,12 +561,22 @@ export class AIChatView extends ViewPane {
 			}
 
 		} catch (error) {
+			console.log('🔍 DEBUG Main workflow error caught:', {
+				errorName: error.name,
+				errorMessage: error.message,
+				errorStack: error.stack
+			});
 			endTimer();
+			this.isGenerating = false;
+			this.updateSendButton();
 			throw error;
+		} finally {
+			this.isGenerating = false;
+			this.updateSendButton();
 		}
 	}
 
-	private async handleStreamingFallback(workflowType: WorkflowType, content: string, contentElement: HTMLElement): Promise<any> {
+	private async handleStreamingFallback(workflowType: WorkflowType, content: string, contentElement?: HTMLElement): Promise<any> {
 		try {
 			console.log(`🔄 Starting fallback for ${workflowType}`);
 			
@@ -402,7 +587,11 @@ export class AIChatView extends ViewPane {
 			if (cached) {
 				console.log(`✅ Using cached content for ${workflowType}`);
 				const finalContent = `🧠 **Generated ${workflowType}** (Cached)\n\n${cached.content}`;
-				this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
+				if (contentElement) {
+					this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
+				} else {
+					this.addAssistantMessage(finalContent);
+				}
 				return cached.content;
 			}
 
@@ -423,8 +612,12 @@ export class AIChatView extends ViewPane {
 			
 			const finalContent = `🧠 **Generated ${workflowType}**\n\n${formattedContent}`;
 			
-			// Update the content element
-			this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
+			// Update the content element or add new message
+			if (contentElement) {
+				this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
+			} else {
+				this.addAssistantMessage(finalContent);
+			}
 			
 			// Cache the result
 			this.cachingService.setCache(cacheKey, { content: formattedContent });
@@ -435,160 +628,362 @@ export class AIChatView extends ViewPane {
 			console.error(`Fallback API call failed for ${workflowType}:`, error);
 			// Show fallback content
 			const fallbackContent = this.workflowDetector.getFallbackContent(workflowType, content);
-			this.updateStreamingContent(contentElement, this.renderMarkdownContent(fallbackContent));
+			if (contentElement) {
+				this.updateStreamingContent(contentElement, this.renderMarkdownContent(fallbackContent));
+			} else {
+				this.addAssistantMessage(fallbackContent);
+			}
 			return fallbackContent;
 		}
 	}
 
 	private async handleChatMessage(content: string): Promise<void> {
-		this.uiService.showTypingIndicator();
+		// Show thinking indicator
+		this.uiService.showThinkingIndicator();
 		
 		try {
-			console.log('🔍 DEBUG handleChatMessage calling backendService.callAPI');
 			const response = await this.backendService.callAPI('chat', content, this.currentMode);
-			console.log('🔍 DEBUG handleChatMessage got response:', {
-				response: response,
-				responseType: typeof response,
-				responseKeys: response && typeof response === 'object' ? Object.keys(response) : 'N/A',
-				responseContent: response?.content,
-				responseUsage: response?.usage
-			});
-			
-			const aiMessage = this.messageService.createAssistantMessage(
-				response.content,
-				{
-					usage: response.usage,
-					requestId: response.requestId,
-					model: response.model,
-					finishReason: response.finishReason
-				}
-			);
-			
-			this.addMessage(aiMessage);
+			this.addAssistantMessage(response.content);
 		} catch (error) {
-			console.log('🔍 DEBUG handleChatMessage caught error:', {
-				error: error,
-				errorType: typeof error,
-				errorConstructor: error?.constructor?.name,
-				errorMessage: error?.message,
-				errorName: error?.name,
-				errorStack: error?.stack?.substring(0, 200) + '...'
-			});
 			console.error('Failed to send message:', error);
 			this.showError(this.messageService.getErrorMessage(error));
 		} finally {
-			this.uiService.hideTypingIndicator();
+			this.uiService.hideThinkingIndicator();
 		}
 	}
 
-	private addMessage(message: IAIMessage): void {
-		this.messageService.addMessage(message);
-		this.messageService.renderMessage(
-			message, 
-			this.messageList, 
-			(content) => this.renderMarkdownContent(content)
-		);
+	private addUserMessage(content: string): void {
+		const messageDiv = append(this.messageList, $('.message.user'));
+		messageDiv.setAttribute('data-message-id', this.generateMessageId());
+		
+		const messageContent = append(messageDiv, $('.message-content'));
+		messageContent.textContent = content;
+		
+		// Add expand functionality for long messages
+		if (content.length > 100) {
+			messageDiv.classList.add('has-overflow');
+			const expandIndicator = append(messageDiv, $('.expand-indicator'));
+			expandIndicator.textContent = 'Click to expand';
+			
+			messageDiv.addEventListener('click', () => {
+				messageDiv.classList.toggle('expanded');
+				expandIndicator.textContent = messageDiv.classList.contains('expanded') ? 'Click to collapse' : 'Click to expand';
+			});
+		}
+		
+		this.uiService.scrollToBottom(this.messageList);
+	}
+
+	private addAssistantMessage(content: string): void {
+		const messageDiv = append(this.messageList, $('.message.assistant'));
+		messageDiv.setAttribute('data-message-id', this.generateMessageId());
+		
+		const messageContent = append(messageDiv, $('.message-content'));
+		
+		// Use VS Code's safe HTML rendering instead of innerHTML
+		const renderedContent = this.renderMarkdownContent(content);
+		messageContent.appendChild(renderedContent);
+		
 		this.uiService.scrollToBottom(this.messageList);
 	}
 
 	private showError(message: string): void {
-		const errorMessage = this.messageService.createErrorMessage(message);
-		this.addMessage(errorMessage);
+		const errorDiv = append(this.messageList, $('.message.assistant'));
+		errorDiv.setAttribute('data-message-id', this.generateMessageId());
+		
+		const messageContent = append(errorDiv, $('.message-content'));
+		
+		// Use safeSetInnerHtml for error messages
+		safeSetInnerHtml(messageContent, `<span style="color: #f87171;">❌ ${message}</span>`);
+		
+		this.uiService.scrollToBottom(this.messageList);
 	}
 
 	private updateSendButton(): void {
-		const hasContent = this.inputBox.value.trim().length > 0;
-		const isConnected = this.backendService.isSessionConnected();
-		
-		this.uiService.updateSendButton(this.sendButton, hasContent, isConnected);
-	}
-
-	private async setMode(mode: AICompanionMode): Promise<void> {
-		this.currentMode = mode;
-		await this.aiCompanionService.setMode(mode);
-		
-		// Update UI
-		this.uiService.updateModeButtons(this.element!, mode);
-
-		// Show mode change message
-		const modeMessage = this.messageService.createSystemMessage(
-			`🔄 **Mode Changed to ${mode}**\n\n${mode === AICompanionMode.Builder 
-				? '🔨 **Builder Mode**: I will automatically generate requirements → design → tasks → code when you request to build something.'
-				: '🧠 **Helper Mode**: I will assist and guide you step by step.'
-			}`
-		);
-		
-		this.addMessage(modeMessage);
-	}
-
-	private updateStreamingContent(element: HTMLElement, content: HTMLElement): void {
-		if (element) {
-			element.style.opacity = '0.9';
-			element.style.transform = 'translateY(1px)';
-			
-			// Clear existing content safely
-			while (element.firstChild) {
-				element.removeChild(element.firstChild);
+		if (this.sendButton) {
+			if (this.isGenerating) {
+				this.sendButton.classList.add('stop-mode');
+				this.sendButton.textContent = '■';
+			} else {
+				this.sendButton.classList.remove('stop-mode');
+				this.sendButton.textContent = '↗';
 			}
-			
-			// Append new content
-			element.appendChild(content);
-			element.style.opacity = '1';
-			element.style.transform = 'translateY(0)';
-			element.style.transition = 'all 0.2s ease-out';
-			
-			this.uiService.scrollToBottom(this.messageList);
-			
-			setTimeout(() => {
-				element.style.transition = '';
-			}, 200);
 		}
 	}
 
-	// Helper method to render markdown content using VS Code's trusted renderer
+	private generateMessageId(): string {
+		return `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+	}
+
+	// Add missing methods that are being called in the code
+	private addMessage(message: any): void {
+		if (message.type === 'user') {
+			this.addUserMessage(message.content);
+		} else if (message.type === 'assistant') {
+			this.addAssistantMessage(message.content);
+		}
+	}
+
+	private getMessageElement(container: HTMLElement, messageId: string): HTMLElement | null {
+		return container.querySelector(`[data-message-id="${messageId}"]`) as HTMLElement;
+	}
+
 	private renderMarkdownContent(content: string): HTMLElement {
 		try {
-			const markdownString = new MarkdownString(content, { isTrusted: true });
-			const result = this.markdownRenderer.render(markdownString);
+			// Use VS Code's built-in markdown renderer
+			const markdownString: IMarkdownString = {
+				value: content,
+				isTrusted: true,
+				supportThemeIcons: true
+			};
 			
-			// Register the disposable for cleanup
+			const result = this.markdownRenderer.render(markdownString);
+			const container = result.element;
+			container.className = 'message-content';
+			
+			// Store the result for proper disposal
 			this._register(result);
 			
-			return result.element;
+			return container;
 		} catch (error) {
-			console.warn('Markdown rendering failed, falling back to plain text:', error);
-			const fallbackElement = document.createElement('span');
-			fallbackElement.textContent = content;
-			return fallbackElement;
+			console.error('Error rendering markdown content:', error);
+			// Fallback to plain text
+			const fallbackContainer = document.createElement('div');
+			fallbackContainer.className = 'message-content';
+			fallbackContainer.textContent = content;
+			return fallbackContainer;
+		}
+	}
+	
+
+
+	private updateStreamingContent(contentElement: HTMLElement, newContent: HTMLElement): void {
+		try {
+			// Clear existing content
+			contentElement.innerHTML = '';
+			
+			// Append the new content
+			contentElement.appendChild(newContent);
+			
+			// Scroll to bottom
+			this.uiService.scrollToBottom(this.messageList);
+		} catch (error) {
+			console.error('Error updating streaming content:', error);
+			// Fallback to text content
+			contentElement.textContent = newContent.textContent || 'Error updating content';
+		}
+	}
+
+	private formatCodeGeneration(content: string, workflowType: WorkflowType, isFinal?: boolean): string {
+		// For code generation, format as a file with syntax highlighting
+		const fileName = this.extractFileName(content) || 'generated-file';
+		const fileExtension = this.getFileExtension(fileName);
+		
+		// Show notification for file generation
+		if (isFinal) {
+			this.showFileGenerationNotification(fileName, 'completed');
+		}
+		
+		return `📁 **Generated File: ${fileName}** ${isFinal ? '(Complete)' : '(Generating...)'}\n\n\`\`\`${fileExtension}\n${content}\n\`\`\``;
+	}
+
+	private extractFileName(content: string): string | null {
+		// Try to extract filename from content patterns
+		const patterns = [
+			/^#\s*(.+\.(ts|js|tsx|jsx|py|java|cpp|c|h|html|css|json|md|txt))$/m,
+			/^\/\/\s*File:\s*(.+\.(ts|js|tsx|jsx|py|java|cpp|c|h|html|css|json|md|txt))$/m,
+			/^\/\*\s*File:\s*(.+\.(ts|js|tsx|jsx|py|java|cpp|c|h|html|css|json|md|txt))\s*\*\/$/m
+		];
+		
+		for (const pattern of patterns) {
+			const match = content.match(pattern);
+			if (match) {
+				return match[1];
+			}
+		}
+		
+		return null;
+	}
+
+	private getFileExtension(fileName: string): string {
+		const extension = fileName.split('.').pop()?.toLowerCase();
+		const extensionMap: Record<string, string> = {
+			'ts': 'typescript',
+			'js': 'javascript',
+			'tsx': 'typescript',
+			'jsx': 'javascript',
+			'py': 'python',
+			'java': 'java',
+			'cpp': 'cpp',
+			'c': 'c',
+			'h': 'c',
+			'html': 'html',
+			'css': 'css',
+			'json': 'json',
+			'md': 'markdown',
+			'txt': 'text'
+		};
+		
+		return extensionMap[extension || ''] || 'text';
+	}
+
+	private showFileGenerationNotification(fileName: string, status: 'started' | 'completed' | 'failed'): void {
+		const statusEmoji = {
+			started: '🚀',
+			completed: '✅',
+			failed: '❌'
+		};
+		
+		const statusText = {
+			started: 'File generation started',
+			completed: 'File generation completed',
+			failed: 'File generation failed'
+		};
+		
+		const notification = `${statusEmoji[status]} **${statusText[status]}**: ${fileName}`;
+		this.addAssistantMessage(notification);
+	}
+
+	// Helper method to map workflow types to step indices
+	private getStepIndex(workflowType: string): number {
+		const stepMap: Record<string, number> = {
+			'requirements': 0,
+			'design': 1,
+			'tasks': 2,
+			'code': 3
+		};
+		return stepMap[workflowType] || 0;
+	}
+
+	// Smooth progress update with requestAnimationFrame for extra smoothness
+	// private smoothProgressUpdate(stepIndex: number, progressPercent: number): void {
+	// 	requestAnimationFrame(() => {
+	// 		this.uiService.updateWorkflowStepProgress(stepIndex, progressPercent);
+	// 	});
+	// }
+
+	// Helper delay method for smooth transitions between workflow steps
+	private async delay(ms: number): Promise<void> {
+		return new Promise(resolve => setTimeout(resolve, ms));
+	}
+
+	// Helper method to handle streaming workflow with a specific content element
+	private async handleStreamingWorkflowWithElement(
+		workflowType: WorkflowType, 
+		content: string, 
+		contentElement: HTMLElement, 
+		endTimer: () => void, 
+		cacheKey: string
+	): Promise<any> {
+		// Get connection and context
+		const connectionId = this.connectionPool.getConnectionId(workflowType);
+		this.connectionPool.createConnection(connectionId);
+		const context = await this.contextService.getPreloadedContext();
+
+		try {
+			// Try streaming if enabled
+			if (this.streamingEnabled) {
+				console.log('🚀 Attempting streaming request...');
+				const response = await this.backendService.createStreamingRequest(workflowType, content, context);
+
+				console.log('🔍 DEBUG Streaming response received:', {
+					ok: response.ok,
+					status: response.status,
+					statusText: response.statusText,
+					headers: Object.fromEntries(response.headers.entries())
+				});
+
+				if (response.ok) {
+					console.log('✅ Streaming response OK, processing...');
+					
+					// Start independent progress animation
+					const stepIndex = this.getStepIndex(workflowType);
+					this.uiService.startIndependentProgress(stepIndex); // Use default 25 second duration
+					
+					// Process streaming response
+					await this.streamingService.processStreamingResponse(
+						response,
+						contentElement,
+						workflowType,
+						(content, type, isFinal) => {
+							// For code generation, format as file content
+							if (workflowType === 'code') {
+								return this.formatCodeGeneration(content, type as WorkflowType, isFinal);
+							}
+							return this.workflowFormatter.formatStreamingContent(content, type as WorkflowType, isFinal);
+						},
+						(content) => this.renderMarkdownContent(content)
+					);
+					
+					// Complete the progress when streaming ends
+					this.uiService.completeProgress(stepIndex);
+					
+					// Cache the content
+					const finalContent = contentElement?.textContent || contentElement?.innerHTML || '';
+					console.log('💾 Caching final content, length:', finalContent.length);
+					console.log('🔍 DEBUG Final content preview:', finalContent.substring(0, 100));
+					
+					if (!finalContent || finalContent.trim().length === 0) {
+						console.error('❌ Final content is empty, this indicates a streaming processing issue');
+						throw new Error('Streaming response produced empty content');
+					}
+					
+					this.cachingService.setCache(cacheKey, { content: finalContent });
+					endTimer();
+					return finalContent;
+				} else {
+					console.log(`⚠️ Streaming failed (${response.status}), falling back to regular API`);
+				}
+			}
+
+			// Fallback to regular API
+			console.log('🔄 Falling back to regular API...');
+			const fallbackResult = await this.handleStreamingFallback(workflowType, content, contentElement);
+			console.log('🔍 DEBUG Fallback result:', {
+				hasResult: !!fallbackResult,
+				resultType: typeof fallbackResult,
+				resultLength: fallbackResult ? fallbackResult.length : 0
+			});
+			endTimer();
+			return fallbackResult;
+
+		} catch (error: any) {
+			console.log('🔍 DEBUG Streaming error caught:', {
+				errorName: error.name,
+				errorMessage: error.message,
+				errorStack: error.stack
+			});
+			
+			if (error.name === 'AbortError') {
+				console.log('Request was aborted');
+			} else {
+				console.log(`⚠️ Streaming error: ${error.message}, falling back to regular API`);
+				const fallbackResult = await this.handleStreamingFallback(workflowType, content, contentElement);
+				endTimer();
+				return fallbackResult;
+			}
+		} finally {
+			this.connectionPool.removeConnection(connectionId);
 		}
 	}
 
 	// Event handlers
 	private onConversationChanged(conversation: any): void {
-		if (conversation?.messages) {
-			// Update message service and re-render
-			this.messageService.clearMessages();
-			conversation.messages.forEach((msg: IAIMessage) => {
-				this.messageService.addMessage(msg);
-			});
-			this.messageService.renderAllMessages(
-				this.messageList, 
-				(content) => this.renderMarkdownContent(content)
-			);
-		}
+		// Handle conversation changes
 	}
 
 	private onStateChanged(state: any): void {
-		if (state === 'generating' || state === 'thinking') {
-			this.uiService.showTypingIndicator();
+		// Only show thinking indicator for non-streaming states
+		// Streaming has its own visual feedback
+		if ((state === 'generating' || state === 'thinking') && !this.isGenerating) {
+			this.uiService.showThinkingIndicator();
 		} else {
-			this.uiService.hideTypingIndicator();
+			this.uiService.hideThinkingIndicator();
 		}
 	}
 
 	private onModeChanged(mode: AICompanionMode): void {
 		this.currentMode = mode;
-		this.uiService.updateModeButtons(this.element!, mode);
 	}
 
 	// ViewPane overrides

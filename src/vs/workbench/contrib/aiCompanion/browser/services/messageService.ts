@@ -75,12 +75,11 @@ export class MessageService {
 		messageElement.classList.add(`ai-message-${message.type}`);
 		messageElement.setAttribute('data-message-id', message.id);
 
-		// Avatar
-		const avatar = append(messageElement, $('.ai-message-avatar'));
-		const avatarIcon = append(avatar, $('span.codicon'));
-		avatarIcon.className = `codicon codicon-${message.type === MessageType.User ? 'account' : 'lightbulb'}`;
+		// Header with name (no avatar)
+		const header = append(messageElement, $('.ai-message-header'));
+		header.textContent = message.type === MessageType.User ? 'You' : 'AI Assistant';
 
-		// Content container
+		// Content container (indented under header)
 		const contentContainer = append(messageElement, $('.ai-message-content'));
 
 		// Message content
@@ -93,7 +92,13 @@ export class MessageService {
 		// Append the rendered element directly
 		content.appendChild(renderedElement);
 
-		// Footer with timestamp and usage
+		// Add progress indicators if this is a workflow message
+		if (message.type === MessageType.Assistant && (message.metadata as any)?.workflowType) {
+			const progressContainer = append(contentContainer, $('.workflow-progress'));
+			this.renderWorkflowProgress(progressContainer, (message.metadata as any).workflowType);
+		}
+
+		// Footer with timestamp and usage (minimal)
 		const footer = append(contentContainer, $('.ai-message-footer'));
 
 		const timestamp = append(footer, $('.ai-message-timestamp'));
@@ -193,5 +198,31 @@ export class MessageService {
 			// If even error parsing fails, return a safe message
 			return 'An unexpected error occurred';
 		}
+	}
+
+	private renderWorkflowProgress(container: HTMLElement, workflowType: string): void {
+		// Create a simple progress indicator
+		const progressText = append(container, $('.workflow-progress-text'));
+		progressText.textContent = `🔄 Generating ${workflowType}...`;
+		
+		// Add a simple progress bar
+		const progressBar = append(container, $('.workflow-progress-bar'));
+		progressBar.style.width = '100%';
+		progressBar.style.height = '2px';
+		progressBar.style.background = 'var(--vscode-progressBar-background)';
+		progressBar.style.marginTop = '8px';
+		progressBar.style.borderRadius = '1px';
+		progressBar.style.overflow = 'hidden';
+		
+		const progressFill = append(progressBar, $('.workflow-progress-fill'));
+		progressFill.style.width = '0%';
+		progressFill.style.height = '100%';
+		progressFill.style.background = 'var(--vscode-progressBar-background)';
+		progressFill.style.transition = 'width 0.3s ease';
+		
+		// Animate the progress
+		setTimeout(() => {
+			progressFill.style.width = '100%';
+		}, 100);
 	}
 }

@@ -272,10 +272,10 @@ export class UIService {
 		return { messageList, inputContainer };
 	}
 
-		createInputContainer(container: HTMLElement, onSend: () => void, onInputChange: (value: string) => void): { 
+	createInputContainer(container: HTMLElement, onSend: () => void, onInputChange: (value: string) => void): { 
 			inputBox: HTMLTextAreaElement; 
-			sendButton: HTMLButtonElement; 
-		} {
+		sendButton: HTMLButtonElement; 
+	} {
 			// Create input wrapper
 			const inputWrapper = append(container, $('.input-wrapper'));
 
@@ -683,7 +683,7 @@ export class UIService {
 				sendButton.classList.add('active');
 				inputBox.focus();
 			}
-		}
+	}
 
 	addModernStyles(): void {
 		if (document.getElementById('ai-companion-modern-styles')) return;
@@ -769,7 +769,7 @@ export class UIService {
 					color: #ffffff;
 					font-weight: 400;
 					max-height: 60px;
-					overflow: hidden;
+				overflow: hidden;
 					transition: max-height 0.3s ease;
 				}
 
@@ -836,9 +836,9 @@ export class UIService {
 					border-top: 1px solid #1a1a1a;
 					background: rgba(10, 10, 10, 0.8);
 					backdrop-filter: blur(20px);
-					flex-shrink: 0;
+				flex-shrink: 0;
 					min-height: 60px;
-				}
+			}
 
 				.input-wrapper {
 					position: relative;
@@ -888,9 +888,9 @@ export class UIService {
 				}
 
 				.model-section {
-					display: flex;
-					align-items: center;
-					gap: 6px;
+				display: flex;
+				align-items: center;
+				gap: 6px;
 				}
 
 				.mode-section {
@@ -919,7 +919,7 @@ export class UIService {
 					border: none;
 					color: rgba(255, 255, 255, 0.5);
 					font-size: 9px;
-					font-weight: 500;
+				font-weight: 500;
 					padding: 3px 6px;
 					cursor: pointer;
 					transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
@@ -960,7 +960,7 @@ export class UIService {
 				}
 
 				.model-dropdown:hover {
-					background: rgba(255, 255, 255, 0.05);
+				background: rgba(255, 255, 255, 0.05);
 					border-color: rgba(255, 255, 255, 0.12);
 					color: rgba(255, 255, 255, 0.9);
 				}
@@ -988,12 +988,12 @@ export class UIService {
 				}
 
 				.input-row {
-					display: flex;
+				display: flex;
 					align-items: flex-end;
-				}
+			}
 
 				.chat-input {
-					flex: 1;
+				flex: 1;
 					padding: 8px 12px;
 					background: transparent;
 					border: none;
@@ -1060,7 +1060,7 @@ export class UIService {
 				}
 
 				.welcome-screen {
-					display: flex;
+				display: flex;
 					flex-direction: column;
 					align-items: center;
 					justify-content: center;
@@ -1088,13 +1088,13 @@ export class UIService {
 				.welcome-suggestions {
 					display: grid;
 					grid-template-columns: 1fr 1fr;
-					gap: 12px;
+				gap: 12px;
 					max-width: 500px;
 					width: 100%;
 				}
 
 				.suggestion-card {
-					padding: 16px;
+				padding: 16px;
 					background: #111;
 					border: 1px solid #1a1a1a;
 					border-radius: 8px;
@@ -1155,12 +1155,12 @@ export class UIService {
 				.step-circle {
 					width: 24px;
 					height: 24px;
-					border-radius: 50%;
+				border-radius: 50%;
 					background: #0a0a0a;
 					border: 2px solid #333;
 				display: flex;
 				align-items: center;
-					justify-content: center;
+				justify-content: center;
 					font-size: 10px;
 					font-weight: 700;
 					color: #666;
@@ -1258,7 +1258,7 @@ export class UIService {
 					margin: 12px 0;
 					overflow-x: auto;
 					font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', 'Courier New', monospace;
-					font-size: 13px;
+				font-size: 13px;
 					line-height: 1.4;
 					color: #d4d4d4;
 				}
@@ -1274,7 +1274,7 @@ export class UIService {
 
 				.message-content pre code {
 				background: transparent;
-					padding: 0;
+				padding: 0;
 					color: #d4d4d4;
 				}
 
@@ -1325,8 +1325,8 @@ export class UIService {
 
 				.message-content blockquote {
 					border-left: 3px solid #007acc;
-					padding-left: 12px;
-					margin: 12px 0;
+				padding-left: 12px;
+				margin: 12px 0;
 					color: #aaa;
 					font-style: italic;
 				}
@@ -1398,15 +1398,15 @@ export class UIService {
 				}
 
 				@keyframes messageSlideIn {
-					from {
-						opacity: 0;
+				from {
+					opacity: 0;
 						transform: translateY(10px);
-					}
-					to {
-						opacity: 1;
-						transform: translateY(0);
-					}
 				}
+				to {
+					opacity: 1;
+					transform: translateY(0);
+				}
+			}
 
 				/* Hover effects */
 				.message.user:hover {
@@ -1585,7 +1585,7 @@ export class UIService {
 					.step-circle.active {
 						animation: none;
 					}
-				}
-			`;
-		}
+			}
+		`;
 	}
+}

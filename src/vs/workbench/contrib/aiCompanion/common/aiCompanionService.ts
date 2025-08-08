@@ -148,4 +148,11 @@ export interface IAICompanionService {
 		files: string[];
 		gitBranch?: string;
 	}>;
+
+	// Code search methods
+	searchCode(query: string, options?: any): Promise<any>;
+	findCodeReferences(symbol: string): Promise<any>;
+	findCodeDefinitions(symbol: string): Promise<any>;
+	analyzeCodebase(): Promise<any>;
+	getCodeContext(filePath: string, lineNumber: number, contextLines?: number): Promise<string>;
 }

@@ -6,6 +6,12 @@ import { IViewsRegistry, Extensions as ViewExtensions } from '../../../common/vi
 // Import our service interface and implementation
 import { IAICompanionService } from './aiCompanionService.js';
 import { AICompanionService } from './aiCompanionService.impl.js';
+import { IWorkspaceEditService } from './workspaceEditService.js';
+import { WorkspaceEditService } from './workspaceEditService.js';
+import { ICodeSearchService } from './codeSearchService.js';
+import { CodeSearchService } from './codeSearchService.js';
+import { IAINotificationService } from './aiNotificationService.js';
+import { AINotificationService } from './aiNotificationService.js';
 
 // Import our view components
 import { AI_COMPANION_CONTAINER } from '../browser/aiCompanionViewContainer.js';
@@ -14,6 +20,15 @@ import { AICompanionViewIds } from './aiCompanionServiceTokens.js';
 
 // Register the AI Companion service as a singleton
 registerSingleton(IAICompanionService, AICompanionService, InstantiationType.Eager);
+
+// Register the WorkspaceEdit service as a singleton
+registerSingleton(IWorkspaceEditService, WorkspaceEditService, InstantiationType.Eager);
+
+// Register the CodeSearch service as a singleton
+registerSingleton(ICodeSearchService, CodeSearchService, InstantiationType.Eager);
+
+// Register the AI Notification service as a singleton
+registerSingleton(IAINotificationService, AINotificationService, InstantiationType.Eager);
 
 // Register the chat view in the AI Companion container
 const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);

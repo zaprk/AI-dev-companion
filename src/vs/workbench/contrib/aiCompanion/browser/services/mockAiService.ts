@@ -1,5 +1,9 @@
 // src/vs/workbench/contrib/aiCompanion/browser/services/mockAiService.ts
 
+import { ICodeSearchService } from '../../common/codeSearchService.js';
+import { IAINotificationService } from '../../common/aiNotificationService.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
+
 export interface MockAIResponse {
 	content: string;
 	usage: {
@@ -13,43 +17,90 @@ export interface MockAIResponse {
 	requestId: string;
 }
 
+export interface EnhancedMockAIResponse extends MockAIResponse {
+	codebaseContext?: {
+		relatedFiles: string[];
+		patterns: string[];
+		insights: string;
+	};
+}
+
 export class MockAIService {
 	private sessionId: string;
+	private codeSearchService?: ICodeSearchService;
+	private aiNotificationService?: IAINotificationService;
+	private logService?: ILogService;
 
-	constructor(sessionId: string = 'mock-session-123') {
+	constructor(
+		sessionId: string = 'mock-session-123',
+		codeSearchService?: ICodeSearchService,
+		aiNotificationService?: IAINotificationService,
+		logService?: ILogService
+	) {
 		this.sessionId = sessionId;
+		this.codeSearchService = codeSearchService;
+		this.aiNotificationService = aiNotificationService;
+		this.logService = logService;
 	}
 
-	async generateMockResponse(type: string, prompt: string): Promise<MockAIResponse> {
-		// Simulate network delay
-		await this.delay(1500 + Math.random() * 1000);
+	async generateMockResponse(type: string, prompt: string): Promise<EnhancedMockAIResponse> {
+		// Show AI thinking notification
+		const thinkingHandle = this.aiNotificationService?.showAIThinking();
 
-		const responses = {
-			requirements: this.getRequirementsResponse(),
-			design: this.getDesignResponse(),
-			tasks: this.getTasksResponse(),
-			code: this.getCodeResponse(),
-			chat: this.getChatResponse(prompt)
-		};
+		try {
+			// Simulate network delay
+			await this.delay(1500 + Math.random() * 1000);
 
-		const content = responses[type as keyof typeof responses] || responses.chat;
-		const tokenCount = Math.floor(content.length / 4); // Rough estimate
+			// Get codebase context if available
+			let codebaseContext = undefined;
+			if (this.codeSearchService) {
+				codebaseContext = await this.getCodebaseContext(prompt, type);
+			}
 
-		return {
-			content,
-			usage: {
-				promptTokens: Math.floor(prompt.length / 4),
-				completionTokens: tokenCount,
-				totalTokens: Math.floor(prompt.length / 4) + tokenCount
-			},
-			model: 'gpt-4-mock',
-			finishReason: 'stop',
-			sessionId: this.sessionId,
-			requestId: `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-		};
+			const responses = {
+				requirements: this.getRequirementsResponse(codebaseContext),
+				design: this.getDesignResponse(codebaseContext),
+				tasks: this.getTasksResponse(codebaseContext),
+				code: this.getCodeResponse(codebaseContext),
+				chat: this.getChatResponse(prompt, codebaseContext)
+			};
+
+			const content = responses[type as keyof typeof responses] || responses.chat;
+			const tokenCount = Math.floor(content.length / 4); // Rough estimate
+
+			// Close thinking notification and show completion
+			thinkingHandle?.close();
+			this.aiNotificationService?.showSuccess({
+				title: 'AI Response Generated',
+				message: `✅ Generated ${type} response with ${tokenCount} tokens`,
+				autoClose: true
+			});
+
+			return {
+				content,
+				usage: {
+					promptTokens: Math.floor(prompt.length / 4),
+					completionTokens: tokenCount,
+					totalTokens: Math.floor(prompt.length / 4) + tokenCount
+				},
+				model: 'gpt-4-mock',
+				finishReason: 'stop',
+				sessionId: this.sessionId,
+				requestId: `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+				codebaseContext
+			};
+		} catch (error) {
+			thinkingHandle?.close();
+			this.aiNotificationService?.showError({
+				title: 'AI Response Failed',
+				message: 'Failed to generate AI response',
+				error: error as Error
+			});
+			throw error;
+		}
 	}
 
-	// Simulate streaming response
+	// Simulate streaming response with enhanced context
 	async *generateStreamingResponse(type: string, prompt: string): AsyncGenerator<string, void, unknown> {
 		const fullResponse = await this.generateMockResponse(type, prompt);
 		const content = fullResponse.content;
@@ -71,7 +122,92 @@ export class MockAIService {
 		}
 	}
 
-	private getRequirementsResponse(): string {
+	private async getCodebaseContext(prompt: string, type: string): Promise<any> {
+		if (!this.codeSearchService) return null;
+
+		try {
+			const context: any = {
+				relatedFiles: [],
+				patterns: [],
+				insights: ''
+			};
+
+			// Search for relevant code patterns based on the prompt and type
+			const searchTerms = this.extractSearchTerms(prompt, type);
+			
+			for (const term of searchTerms) {
+				try {
+					const results = await this.codeSearchService.searchText(term, {
+						maxResults: 5,
+						includePattern: ['**/*.ts', '**/*.js', '**/*.tsx', '**/*.jsx']
+					});
+
+					results.forEach(result => {
+						context.relatedFiles.push(result.filePath);
+						result.matches.forEach(match => {
+							context.patterns.push(match.text);
+						});
+					});
+				} catch (error) {
+					this.logService?.warn(`Failed to search for term "${term}":`, error);
+				}
+			}
+
+			// Get codebase analysis if this is a design or requirements request
+			if (type === 'design' || type === 'requirements') {
+				try {
+					const analysis = await this.codeSearchService.analyzeCodebase();
+					context.insights = `Codebase has ${analysis.totalFiles} files, ${Object.keys(analysis.languages).length} languages, and ${analysis.frameworks.join(', ') || 'no frameworks'} detected`;
+				} catch (error) {
+					this.logService?.warn('Failed to analyze codebase:', error);
+				}
+			}
+
+			return context;
+		} catch (error) {
+			this.logService?.error('Failed to get codebase context:', error);
+			return null;
+		}
+	}
+
+	private extractSearchTerms(prompt: string, type: string): string[] {
+		const terms: string[] = [];
+		const lowerPrompt = prompt.toLowerCase();
+
+		// Extract technology-related terms
+		const techTerms = ['react', 'typescript', 'javascript', 'node', 'express', 'prisma', 'postgresql', 'mongodb', 'redis', 'docker', 'aws', 'stripe', 'material-ui', 'mui', 'redux', 'next', 'vue', 'angular'];
+		techTerms.forEach(term => {
+			if (lowerPrompt.includes(term)) {
+				terms.push(term);
+			}
+		});
+
+		// Extract pattern-related terms
+		const patternTerms = ['function', 'class', 'interface', 'component', 'hook', 'service', 'controller', 'model', 'api', 'route', 'middleware'];
+		patternTerms.forEach(term => {
+			if (lowerPrompt.includes(term)) {
+				terms.push(term);
+			}
+		});
+
+		// Add type-specific terms
+		if (type === 'code') {
+			terms.push('import', 'export', 'const', 'let', 'var');
+		} else if (type === 'design') {
+			terms.push('architecture', 'structure', 'component', 'service');
+		} else if (type === 'requirements') {
+			terms.push('requirement', 'feature', 'functionality');
+		}
+
+		return terms.slice(0, 5); // Limit to 5 terms
+	}
+
+	private getRequirementsResponse(codebaseContext?: any): string {
+		let contextInfo = '';
+		if (codebaseContext?.insights) {
+			contextInfo = `\n\n**Codebase Context:** ${codebaseContext.insights}`;
+		}
+
 		return JSON.stringify({
 			functional: [
 				"User registration and authentication system with email verification",
@@ -121,11 +257,44 @@ export class MockAIService {
 				"Return/refund policy will follow standard e-commerce practices",
 				"Initial launch will target domestic market before international expansion"
 			],
-			reasoning: "This e-commerce platform is designed as a comprehensive solution that balances user experience with business requirements. The functional requirements cover all essential e-commerce features from browsing to checkout, while non-functional requirements ensure scalability and security. The constraints reflect realistic business limitations, and assumptions help guide development priorities. The platform is structured to support both immediate launch needs and future growth opportunities."
+			reasoning: `This e-commerce platform is designed as a comprehensive solution that balances user experience with business requirements. The functional requirements cover all essential e-commerce features from browsing to checkout, while non-functional requirements ensure scalability and security. The constraints reflect realistic business limitations, and assumptions help guide development priorities. The platform is structured to support both immediate launch needs and future growth opportunities.${contextInfo}`
 		}, null, 2);
 	}
 
-	private getDesignResponse(): string {
+	private getDesignResponse(codebaseContext?: any): string {
+		let contextInfo = '';
+		if (codebaseContext?.insights) {
+			contextInfo = `\n\n**Codebase Context:** ${codebaseContext.insights}`;
+		}
+
+		// Adjust tech stack based on codebase context
+		let techStack = [
+			"Frontend: React 18, TypeScript, Redux Toolkit, Material-UI",
+			"Backend: Node.js, Express.js, TypeScript, JWT authentication",
+			"Database: PostgreSQL with Prisma ORM",
+			"Caching: Redis for session and product caching",
+			"Payment: Stripe API integration",
+			"File Storage: AWS S3 for product images",
+			"Email: SendGrid for transactional emails",
+			"Testing: Jest, React Testing Library, Supertest",
+			"Deployment: Docker containers on AWS ECS",
+			"CI/CD: GitHub Actions with automated testing"
+		];
+
+		// If we found specific patterns in the codebase, adjust recommendations
+		if (codebaseContext?.patterns) {
+			if (codebaseContext.patterns.some((p: string) => p.includes('Next.js'))) {
+				techStack = techStack.map(tech => 
+					tech.includes('React 18') ? 'Frontend: Next.js 13, TypeScript, Redux Toolkit, Material-UI' : tech
+				);
+			}
+			if (codebaseContext.patterns.some((p: string) => p.includes('MongoDB'))) {
+				techStack = techStack.map(tech => 
+					tech.includes('PostgreSQL') ? 'Database: MongoDB with Mongoose ODM' : tech
+				);
+			}
+		}
+
 		return JSON.stringify({
 			folderStructure: {
 				"frontend/": {
@@ -189,18 +358,7 @@ export class MockAIService {
 				"Footer with company information and links"
 			],
 			architecture: "Modern full-stack architecture using React.js frontend with Redux for state management, Node.js/Express backend with RESTful APIs, PostgreSQL database with Redis caching, and microservices for payment processing and inventory management. The system follows MVC pattern with clear separation of concerns.",
-			techStack: [
-				"Frontend: React 18, TypeScript, Redux Toolkit, Material-UI",
-				"Backend: Node.js, Express.js, TypeScript, JWT authentication",
-				"Database: PostgreSQL with Prisma ORM",
-				"Caching: Redis for session and product caching",
-				"Payment: Stripe API integration",
-				"File Storage: AWS S3 for product images",
-				"Email: SendGrid for transactional emails",
-				"Testing: Jest, React Testing Library, Supertest",
-				"Deployment: Docker containers on AWS ECS",
-				"CI/CD: GitHub Actions with automated testing"
-			],
+			techStack: techStack,
 			dependencies: [
 				"react: ^18.2.0",
 				"redux-toolkit: ^1.9.0",
@@ -218,11 +376,16 @@ export class MockAIService {
 				"cors: ^2.8.5",
 				"helmet: ^6.0.0"
 			],
-			reasoning: "The architecture emphasizes scalability, maintainability, and developer experience. React with TypeScript provides type safety and component reusability, while Redux manages complex state across the application. The Node.js backend offers excellent performance and npm ecosystem access. PostgreSQL ensures data integrity with ACID compliance, while Redis provides fast caching. The microservices approach allows independent scaling of critical components like payments and inventory."
+			reasoning: `The architecture emphasizes scalability, maintainability, and developer experience. React with TypeScript provides type safety and component reusability, while Redux manages complex state across the application. The Node.js backend offers excellent performance and npm ecosystem access. PostgreSQL ensures data integrity with ACID compliance, while Redis provides fast caching. The microservices approach allows independent scaling of critical components like payments and inventory.${contextInfo}`
 		}, null, 2);
 	}
 
-	private getTasksResponse(): string {
+	private getTasksResponse(codebaseContext?: any): string {
+		let contextInfo = '';
+		if (codebaseContext?.insights) {
+			contextInfo = `\n\n**Codebase Context:** ${codebaseContext.insights}`;
+		}
+
 		return JSON.stringify({
 			tasks: [
 				{
@@ -322,16 +485,39 @@ export class MockAIService {
 					complexity: "medium"
 				}
 			],
-			reasoning: "The task breakdown follows a logical development sequence, starting with foundational setup and moving through backend APIs, frontend components, and finally integration and deployment. Each task has clear dependencies and realistic time estimates. The complexity ratings help prioritize developer assignment and planning. Critical path items like authentication and payment processing are properly sequenced to avoid blocking dependencies."
+			reasoning: `The task breakdown follows a logical development sequence, starting with foundational setup and moving through backend APIs, frontend components, and finally integration and deployment. Each task has clear dependencies and realistic time estimates. The complexity ratings help prioritize developer assignment and planning. Critical path items like authentication and payment processing are properly sequenced to avoid blocking dependencies.${contextInfo}`
 		}, null, 2);
 	}
 
-	private getCodeResponse(): string {
+	private getCodeResponse(codebaseContext?: any): string {
+		let contextInfo = '';
+		if (codebaseContext?.insights) {
+			contextInfo = `\n\n**Codebase Context:** ${codebaseContext.insights}`;
+		}
+
+		// Adjust code generation based on codebase context
+		let codeFiles = this.getDefaultCodeFiles();
+		
+		if (codebaseContext?.patterns) {
+			// If we found existing patterns, adapt the code to match
+			if (codebaseContext.patterns.some((p: string) => p.includes('Next.js'))) {
+				codeFiles = this.getNextJsCodeFiles();
+			} else if (codebaseContext.patterns.some((p: string) => p.includes('MongoDB'))) {
+				codeFiles = this.getMongoDBCodeFiles();
+			}
+		}
+
 		return JSON.stringify({
-			files: [
-				{
-					path: "package.json",
-					content: `{
+			files: codeFiles,
+			reasoning: `The generated code provides a solid foundation for the e-commerce platform with modern best practices. The React components use TypeScript and Material-UI for type safety and consistent styling. The backend implements clean architecture with proper separation of concerns, validation, and error handling. The Prisma model provides robust database operations with proper relationships and indexing. All code is production-ready with proper error handling, validation, and TypeScript support.${contextInfo}`
+		}, null, 2);
+	}
+
+	private getDefaultCodeFiles(): any[] {
+		return [
+			{
+				path: "package.json",
+				content: `{
   "name": "ecommerce-platform",
   "version": "1.0.0",
   "description": "Modern e-commerce platform built with React and Node.js",
@@ -359,11 +545,11 @@ export class MockAIService {
   "author": "Your Name",
   "license": "MIT"
 }`,
-					description: "Root package.json with workspace configuration and scripts for managing the monorepo structure"
-				},
-				{
-					path: "frontend/src/components/products/ProductCard.tsx",
-					content: `import React from 'react';
+				description: "Root package.json with workspace configuration and scripts for managing the monorepo structure"
+			},
+			{
+				path: "frontend/src/components/products/ProductCard.tsx",
+				content: `import React from 'react';
 import {
   Card,
   CardContent,
@@ -489,410 +675,162 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     </Card>
   );
 };`,
-					description: "Product card component with Material-UI styling, add to cart functionality, and wishlist support"
-				},
-				{
-					path: "backend/src/models/Product.ts",
-					content: `import { PrismaClient } from '@prisma/client';
+				description: "Product card component with Material-UI styling, add to cart functionality, and wishlist support"
+			}
+		];
+	}
 
-const prisma = new PrismaClient();
+	private getNextJsCodeFiles(): any[] {
+		return [
+			{
+				path: "package.json",
+				content: `{
+  "name": "ecommerce-platform",
+  "version": "1.0.0",
+  "description": "Modern e-commerce platform built with Next.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "jest"
+  },
+  "dependencies": {
+    "next": "^13.4.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@mui/material": "^5.11.0",
+    "@emotion/react": "^11.10.0",
+    "@emotion/styled": "^11.10.0",
+    "@reduxjs/toolkit": "^1.9.0",
+    "react-redux": "^8.0.0",
+    "axios": "^1.3.0",
+    "prisma": "^4.11.0",
+    "@prisma/client": "^4.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "^5.0.0",
+    "eslint": "^8.0.0",
+    "eslint-config-next": "^13.4.0",
+    "jest": "^29.0.0"
+  }
+}`,
+				description: "Next.js package.json with modern dependencies and TypeScript support"
+			}
+		];
+	}
 
-export interface CreateProductData {
+	private getMongoDBCodeFiles(): any[] {
+		return [
+			{
+				path: "backend/src/models/Product.ts",
+				content: `import mongoose, { Schema, Document } from 'mongoose';
+
+export interface IProduct extends Document {
   name: string;
   description: string;
   price: number;
   originalPrice?: number;
-  categoryId: string;
+  categoryId: mongoose.Types.ObjectId;
   stock: number;
   images: string[];
-  tags?: string[];
+  tags: string[];
   weight?: number;
   dimensions?: {
     length: number;
     width: number;
     height: number;
   };
+  slug: string;
+  averageRating: number;
+  reviewCount: number;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-export interface UpdateProductData extends Partial<CreateProductData> {
-  id: string;
-}
-
-export interface ProductFilters {
-  categoryId?: string;
-  minPrice?: number;
-  maxPrice?: number;
-  inStock?: boolean;
-  tags?: string[];
-  search?: string;
-}
-
-export class ProductModel {
-  async create(data: CreateProductData) {
-    return await prisma.product.create({
-      data: {
-        ...data,
-        dimensions: data.dimensions ? JSON.stringify(data.dimensions) : null,
-        tags: data.tags || [],
-        slug: this.generateSlug(data.name),
-        createdAt: new Date(),
-        updatedAt: new Date()
-      },
-      include: {
-        category: true,
-        reviews: {
-          select: {
-            rating: true
-          }
-        }
-      }
-    });
+const ProductSchema = new Schema<IProduct>({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  description: {
+    type: String,
+    required: true
+  },
+  price: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  originalPrice: {
+    type: Number,
+    min: 0
+  },
+  categoryId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Category',
+    required: true
+  },
+  stock: {
+    type: Number,
+    required: true,
+    min: 0,
+    default: 0
+  },
+  images: [{
+    type: String,
+    required: true
+  }],
+  tags: [{
+    type: String
+  }],
+  weight: {
+    type: Number,
+    min: 0
+  },
+  dimensions: {
+    length: { type: Number, min: 0 },
+    width: { type: Number, min: 0 },
+    height: { type: Number, min: 0 }
+  },
+  slug: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  averageRating: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 5
+  },
+  reviewCount: {
+    type: Number,
+    default: 0,
+    min: 0
   }
+}, {
+  timestamps: true
+});
 
-  async findById(id: string) {
-    const product = await prisma.product.findUnique({
-      where: { id },
-      include: {
-        category: true,
-        reviews: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true
-              }
-            }
-          },
-          orderBy: {
-            createdAt: 'desc'
-          }
-        }
-      }
-    });
+// Indexes for better query performance
+ProductSchema.index({ name: 'text', description: 'text' });
+ProductSchema.index({ categoryId: 1 });
+ProductSchema.index({ price: 1 });
+ProductSchema.index({ stock: 1 });
+ProductSchema.index({ slug: 1 });
 
-    if (product) {
-      const avgRating = product.reviews.length > 0
-        ? product.reviews.reduce((sum, review) => sum + review.rating, 0) / product.reviews.length
-        : 0;
-
-      return {
-        ...product,
-        averageRating: Math.round(avgRating * 10) / 10,
-        reviewCount: product.reviews.length
-      };
-    }
-
-    return null;
-  }
-
-  async findMany(filters: ProductFilters = {}, page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
-    
-    const where: any = {};
-    
-    if (filters.categoryId) {
-      where.categoryId = filters.categoryId;
-    }
-    
-    if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
-      where.price = {};
-      if (filters.minPrice !== undefined) where.price.gte = filters.minPrice;
-      if (filters.maxPrice !== undefined) where.price.lte = filters.maxPrice;
-    }
-    
-    if (filters.inStock) {
-      where.stock = { gt: 0 };
-    }
-    
-    if (filters.tags && filters.tags.length > 0) {
-      where.tags = { hasSome: filters.tags };
-    }
-    
-    if (filters.search) {
-      where.OR = [
-        { name: { contains: filters.search, mode: 'insensitive' } },
-        { description: { contains: filters.search, mode: 'insensitive' } }
-      ];
-    }
-
-    const [products, total] = await Promise.all([
-      prisma.product.findMany({
-        where,
-        include: {
-          category: true,
-          reviews: {
-            select: { rating: true }
-          }
-        },
-        skip,
-        take: limit,
-        orderBy: {
-          createdAt: 'desc'
-        }
-      }),
-      prisma.product.count({ where })
-    ]);
-
-    const productsWithRatings = products.map(product => {
-      const avgRating = product.reviews.length > 0
-        ? product.reviews.reduce((sum, review) => sum + review.rating, 0) / product.reviews.length
-        : 0;
-
-      return {
-        ...product,
-        averageRating: Math.round(avgRating * 10) / 10,
-        reviewCount: product.reviews.length
-      };
-    });
-
-    return {
-      products: productsWithRatings,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
-    };
-  }
-
-  async update(data: UpdateProductData) {
-    const { id, ...updateData } = data;
-    
-    return await prisma.product.update({
-      where: { id },
-      data: {
-        ...updateData,
-        dimensions: updateData.dimensions ? JSON.stringify(updateData.dimensions) : undefined,
-        slug: updateData.name ? this.generateSlug(updateData.name) : undefined,
-        updatedAt: new Date()
-      },
-      include: {
-        category: true,
-        reviews: true
-      }
-    });
-  }
-
-  async delete(id: string) {
-    return await prisma.product.delete({
-      where: { id }
-    });
-  }
-
-  async updateStock(id: string, quantity: number) {
-    return await prisma.product.update({
-      where: { id },
-      data: {
-        stock: {
-          decrement: quantity
-        },
-        updatedAt: new Date()
-      }
-    });
-  }
-
-  private generateSlug(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9 -]/g, '')
-      .replace(/\\s+/g, '-')
-      .replace(/-+/g, '-')
-      .trim();
-  }
-}
-
-export const productModel = new ProductModel();`,
-					description: "Comprehensive Product model with CRUD operations, filtering, search, and database interactions using Prisma ORM"
-				},
-				{
-					path: "backend/src/controllers/productController.ts",
-					content: `import { Request, Response } from 'express';
-import { productModel } from '../models/Product';
-import { validateProductData } from '../utils/validation';
-import { uploadToS3 } from '../services/fileUploadService';
-
-export class ProductController {
-  async getProducts(req: Request, res: Response) {
-    try {
-      const {
-        page = 1,
-        limit = 20,
-        categoryId,
-        minPrice,
-        maxPrice,
-        inStock,
-        tags,
-        search
-      } = req.query;
-
-      const filters = {
-        categoryId: categoryId as string,
-        minPrice: minPrice ? parseFloat(minPrice as string) : undefined,
-        maxPrice: maxPrice ? parseFloat(maxPrice as string) : undefined,
-        inStock: inStock === 'true',
-        tags: tags ? (tags as string).split(',') : undefined,
-        search: search as string
-      };
-
-      const result = await productModel.findMany(
-        filters,
-        parseInt(page as string),
-        parseInt(limit as string)
-      );
-
-      res.json({
-        success: true,
-        data: result.products,
-        pagination: result.pagination
-      });
-    } catch (error) {
-      console.error('Error fetching products:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fetch products'
-      });
-    }
-  }
-
-  async getProductById(req: Request, res: Response) {
-    try {
-      const { id } = req.params;
-      const product = await productModel.findById(id);
-
-      if (!product) {
-        return res.status(404).json({
-          success: false,
-          message: 'Product not found'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: product
-      });
-    } catch (error) {
-      console.error('Error fetching product:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fetch product'
-      });
-    }
-  }
-
-  async createProduct(req: Request, res: Response) {
-    try {
-      const validation = validateProductData(req.body);
-      if (!validation.isValid) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: validation.errors && Array.isArray(validation.errors) ? validation.errors : ['Unknown validation error']
-        });
-      }
-
-      // Handle image uploads if files are present
-      let imageUrls: string[] = [];
-      if (req.files && Array.isArray(req.files)) {
-        imageUrls = await Promise.all(
-          req.files.map(async (file: any) => {
-            return await uploadToS3(file.buffer, file.originalname);
-          })
-        );
-      }
-
-      const productData = {
-        ...req.body,
-        images: imageUrls,
-        price: parseFloat(req.body.price),
-        originalPrice: req.body.originalPrice ? parseFloat(req.body.originalPrice) : undefined,
-        stock: parseInt(req.body.stock),
-        weight: req.body.weight ? parseFloat(req.body.weight) : undefined
-      };
-
-      const product = await productModel.create(productData);
-
-      res.status(201).json({
-        success: true,
-        data: product,
-        message: 'Product created successfully'
-      });
-    } catch (error) {
-      console.error('Error creating product:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to create product'
-      });
-    }
-  }
-
-  async updateProduct(req: Request, res: Response) {
-    try {
-      const { id } = req.params;
-      
-      const validation = validateProductData(req.body, false);
-      if (!validation.isValid) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: validation.errors && Array.isArray(validation.errors) ? validation.errors : ['Unknown validation error']
-        });
-      }
-
-      const updateData = {
-        id,
-        ...req.body,
-        price: req.body.price ? parseFloat(req.body.price) : undefined,
-        originalPrice: req.body.originalPrice ? parseFloat(req.body.originalPrice) : undefined,
-        stock: req.body.stock ? parseInt(req.body.stock) : undefined,
-        weight: req.body.weight ? parseFloat(req.body.weight) : undefined
-      };
-
-      const product = await productModel.update(updateData);
-
-      res.json({
-        success: true,
-        data: product,
-        message: 'Product updated successfully'
-      });
-    } catch (error) {
-      console.error('Error updating product:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to update product'
-      });
-    }
-  }
-
-  async deleteProduct(req: Request, res: Response) {
-    try {
-      const { id } = req.params;
-      await productModel.delete(id);
-
-      res.json({
-        success: true,
-        message: 'Product deleted successfully'
-      });
-    } catch (error) {
-      console.error('Error deleting product:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to delete product'
-      });
-    }
-  }
-}
-
-export const productController = new ProductController();`,
-					description: "Product controller with full REST API endpoints for product management, validation, and error handling"
-				}
-			],
-			reasoning: "The generated code provides a solid foundation for the e-commerce platform with modern best practices. The React components use TypeScript and Material-UI for type safety and consistent styling. The backend implements clean architecture with proper separation of concerns, validation, and error handling. The Prisma model provides robust database operations with proper relationships and indexing. All code is production-ready with proper error handling, validation, and TypeScript support."
-		}, null, 2);
+export const Product = mongoose.model<IProduct>('Product', ProductSchema);`,
+				description: "MongoDB Product model with Mongoose schema, indexes, and TypeScript interfaces"
+			}
+		];
 	}
 
-	private getChatResponse(prompt: string): string {
+	private getChatResponse(prompt: string, codebaseContext?: any): string {
 		const responses = [
 			"I'd be happy to help you build an e-commerce platform! This is an exciting project that involves many moving parts. Would you like me to start by generating the requirements, or do you have specific questions about the implementation?",
 			"An e-commerce platform is a great choice for a comprehensive web application. I can help you with everything from the initial requirements gathering to the final code implementation. What specific aspects are you most interested in?",
@@ -901,6 +839,15 @@ export const productController = new ProductController();`,
 		];
 
 		const lowerPrompt = prompt.toLowerCase();
+		
+		// Add context-aware responses
+		if (codebaseContext?.insights) {
+			responses.push(`I can see your codebase has ${codebaseContext.insights}. This gives us a great foundation to build upon! What specific features would you like to add or improve?`);
+		}
+		
+		if (codebaseContext?.relatedFiles.length > 0) {
+			responses.push(`I found some relevant files in your codebase that might be helpful for this project. Would you like me to analyze them and provide specific recommendations based on your existing code structure?`);
+		}
 		
 		if (lowerPrompt.includes('ecommerce') || lowerPrompt.includes('e-commerce') || lowerPrompt.includes('shopping')) {
 			return responses[Math.floor(Math.random() * responses.length)];

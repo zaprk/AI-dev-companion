@@ -12,6 +12,10 @@ import { IContextMenuService } from '../../../../../platform/contextview/browser
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { localize } from '../../../../../nls.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
+import { ICodeSearchService } from '../../common/codeSearchService.js';
+import { IAINotificationService } from '../../common/aiNotificationService.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
+import { IBulkEditService } from '../../../../../editor/browser/services/bulkEditService.js';
 // Removed markdown renderer imports to avoid disposal issues
 import { append, $ } from '../../../../../base/browser/dom.js';
 import { safeSetInnerHtml } from '../../../../../base/browser/domSanitize.js';
@@ -60,6 +64,8 @@ export class AIChatView extends ViewPane {
 	private readonly aiCompanionService: IAICompanionService;
 	private readonly workspaceService: IWorkspaceContextService;
 	private readonly markdownRenderer: MarkdownRenderer;
+	private readonly logService: ILogService;
+	private readonly bulkEditService: IBulkEditService;
 
 	// Specialized services
 	private readonly backendService: IBackendCommunicationService;
@@ -90,16 +96,28 @@ export class AIChatView extends ViewPane {
 		@IThemeService themeService: IThemeService,
 		@IHoverService hoverService: IHoverService,
 		@IAICompanionService aiCompanionService: IAICompanionService,
-		@IWorkspaceContextService workspaceService: IWorkspaceContextService
+		@IWorkspaceContextService workspaceService: IWorkspaceContextService,
+		@ICodeSearchService codeSearchService: ICodeSearchService,
+		@IAINotificationService aiNotificationService: IAINotificationService,
+		@ILogService logService: ILogService,
+		@IBulkEditService bulkEditService: IBulkEditService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		// Initialize core services
 		this.aiCompanionService = aiCompanionService;
 		this.workspaceService = workspaceService;
+		this.logService = logService;
+		this.bulkEditService = bulkEditService;
 
 		// Initialize specialized services
-		this.backendService = new MockBackendCommunicationService(workspaceService, configurationService);
+		this.backendService = new MockBackendCommunicationService(
+			workspaceService, 
+			configurationService,
+			codeSearchService,
+			aiNotificationService,
+			logService
+		);
 		this.streamingService = new StreamingResponseService();
 		this.workflowDetector = new WorkflowDetectionService();
 		
@@ -254,29 +272,29 @@ export class AIChatView extends ViewPane {
 			if (boundaries.recommendedAction === 'prune') {
 				console.warn(`⚠️ Context window approaching limit (${currentTokens} tokens)`);
 				this.showError('Conversation is getting long. Consider starting a new chat for better performance.');
-			}
+		}
 
-			// Clear input and add user message
-			this.inputBox.value = '';
+		// Clear input and add user message
+		this.inputBox.value = '';
 			this.inputBox.style.height = 'auto';
-			this.updateSendButton();
-			
+		this.updateSendButton();
+		
 			// Add user message with modern styling
 			this.addUserMessage(content);
 
-			// Detect workflow type
-			const workflowType: WorkflowType = this.workflowDetector.detectWorkflowType(content);
-			console.log('🔍 Detected workflow type:', workflowType);
-			
+		// Detect workflow type
+		const workflowType: WorkflowType = this.workflowDetector.detectWorkflowType(content);
+		console.log('🔍 Detected workflow type:', workflowType);
+		
 			// Set generating state
 			this.isGenerating = true;
 			this.updateSendButton();
 
 			if (workflowType !== 'chat' && this.isWorkflowRequest(content)) {
-				await this.handleStructuredWorkflow(workflowType, content);
-			} else {
-				await this.handleChatMessage(content);
-			}
+			await this.handleStructuredWorkflow(workflowType, content);
+		} else {
+			await this.handleChatMessage(content);
+		}
 
 		} catch (error) {
 			console.log('🔍 DEBUG sendMessage caught error:', error);
@@ -425,7 +443,7 @@ export class AIChatView extends ViewPane {
 			
 			// Hide thinking indicator since we're starting streaming
 			this.uiService.hideThinkingIndicator();
-			
+
 			// Create streaming message
 			console.log('📝 Creating streaming message...');
 			const streamingMessage = this.messageService.createStreamingMessage(workflowType);
@@ -487,18 +505,18 @@ export class AIChatView extends ViewPane {
 						headers: Object.fromEntries(response.headers.entries())
 					});
 
-									if (response.ok) {
+					if (response.ok) {
 					console.log('✅ Streaming response OK, processing...');
 					
 					// Start independent progress animation
 					const stepIndex = this.getStepIndex(workflowType);
 					this.uiService.startIndependentProgress(stepIndex); // Use default 25 second duration
 					
-					// Process streaming response
-					await this.streamingService.processStreamingResponse(
-						response,
-						contentElement,
-						workflowType,
+						// Process streaming response
+						await this.streamingService.processStreamingResponse(
+							response,
+							contentElement,
+							workflowType,
 						(content, type, isFinal) => {
 							// For code generation, format as file content
 							if (workflowType === 'code') {
@@ -506,8 +524,8 @@ export class AIChatView extends ViewPane {
 							}
 							return this.workflowFormatter.formatStreamingContent(content, type as WorkflowType, isFinal);
 						},
-						(content) => this.renderMarkdownContent(content)
-					);
+							(content) => this.renderMarkdownContent(content)
+						);
 					
 					// Complete the progress when streaming ends
 					this.uiService.completeProgress(stepIndex);
@@ -588,7 +606,7 @@ export class AIChatView extends ViewPane {
 				console.log(`✅ Using cached content for ${workflowType}`);
 				const finalContent = `🧠 **Generated ${workflowType}** (Cached)\n\n${cached.content}`;
 				if (contentElement) {
-					this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
+				this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
 				} else {
 					this.addAssistantMessage(finalContent);
 				}
@@ -614,7 +632,7 @@ export class AIChatView extends ViewPane {
 			
 			// Update the content element or add new message
 			if (contentElement) {
-				this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
+			this.updateStreamingContent(contentElement, this.renderMarkdownContent(finalContent));
 			} else {
 				this.addAssistantMessage(finalContent);
 			}
@@ -629,7 +647,7 @@ export class AIChatView extends ViewPane {
 			// Show fallback content
 			const fallbackContent = this.workflowDetector.getFallbackContent(workflowType, content);
 			if (contentElement) {
-				this.updateStreamingContent(contentElement, this.renderMarkdownContent(fallbackContent));
+			this.updateStreamingContent(contentElement, this.renderMarkdownContent(fallbackContent));
 			} else {
 				this.addAssistantMessage(fallbackContent);
 			}
@@ -926,6 +944,46 @@ export class AIChatView extends ViewPane {
 					if (!finalContent || finalContent.trim().length === 0) {
 						console.error('❌ Final content is empty, this indicates a streaming processing issue');
 						throw new Error('Streaming response produced empty content');
+					}
+					
+					// For code generation, parse the JSON response and create files directly
+					if (workflowType === 'code') {
+						try {
+							console.log('🔍 DEBUG Attempting to parse code generation response...');
+							const codeResponse = JSON.parse(finalContent);
+							
+							if (codeResponse.files && Array.isArray(codeResponse.files)) {
+								console.log(`📁 Found ${codeResponse.files.length} files to generate`);
+								
+								// Create file edits directly using WorkspaceEditService
+								const fileEdits = codeResponse.files.map((file: any) => ({
+									type: 'create' as const,
+									path: file.path,
+									content: file.content,
+									options: { overwrite: true }
+								}));
+								
+								// Import and use WorkspaceEditService directly
+								const { WorkspaceEditService } = await import('../../common/workspaceEditService.js');
+								const workspaceEditService = new WorkspaceEditService(
+									this.bulkEditService,
+									this.logService,
+									this.workspaceService
+								);
+								
+								console.log('🚀 Creating files directly with WorkspaceEditService...');
+								await workspaceEditService.applyEdits(fileEdits);
+								console.log('✅ Files created successfully!');
+								
+								// Show success message
+								this.addAssistantMessage(`✅ Generated ${codeResponse.files.length} files successfully!`);
+							} else {
+								console.warn('⚠️ Code response does not contain files array:', codeResponse);
+							}
+						} catch (parseError) {
+							console.error('❌ Failed to parse code generation response:', parseError);
+							console.log('🔍 DEBUG Raw content that failed to parse:', finalContent);
+						}
 					}
 					
 					this.cachingService.setCache(cacheKey, { content: finalContent });

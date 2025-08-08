@@ -7,6 +7,9 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { IWorkspaceEditService } from './workspaceEditService.js';
+import { ICodeSearchService } from './codeSearchService.js';
+import { IAINotificationService } from './aiNotificationService.js';
 
 import {
 	IAICompanionService,
@@ -82,7 +85,9 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 	private readonly fileService: IFileService;
 	private readonly logService: ILogService;
 	    // private readonly instantiationService: IInstantiationService;
-	private readonly configurationService: IConfigurationService;
+    private readonly workspaceEditService: IWorkspaceEditService;
+    private readonly codeSearchService: ICodeSearchService;
+    private readonly aiNotificationService: IAINotificationService;
 
 	private readonly fileSystemManager: FileSystemManager;
 	private readonly pathUtils: PathUtils;
@@ -100,13 +105,16 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 	private aiProvider: IAIProvider | undefined;
 
-	constructor(
-		@IWorkspaceContextService workspaceService: IWorkspaceContextService,
-		@IFileService fileService: IFileService,
-		@ILogService logService: ILogService,
-		@IInstantiationService instantiationService: IInstantiationService,
-		@IConfigurationService configurationService: IConfigurationService
-	) {
+	    constructor(
+        @IWorkspaceContextService workspaceService: IWorkspaceContextService,
+        @IFileService fileService: IFileService,
+        @ILogService logService: ILogService,
+        @IInstantiationService instantiationService: IInstantiationService,
+        @IConfigurationService configurationService: IConfigurationService,
+        @IWorkspaceEditService workspaceEditService: IWorkspaceEditService,
+        @ICodeSearchService codeSearchService: ICodeSearchService,
+        @IAINotificationService aiNotificationService: IAINotificationService
+    ) {
 		super();
 
 		console.log('🔍 DEBUG AICompanionService constructor called with dependencies:', {
@@ -134,8 +142,10 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		this.workspaceService = workspaceService;
 		this.fileService = fileService;
 		this.logService = logService;
-		        // this.instantiationService = instantiationService;
-		this.configurationService = configurationService;
+		                // this.instantiationService = instantiationService;
+        this.workspaceEditService = workspaceEditService;
+        this.codeSearchService = codeSearchService;
+        this.aiNotificationService = aiNotificationService;
 
 		this.fileSystemManager = new FileSystemManager(
 			workspaceService,
@@ -167,23 +177,11 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				return;
 			}
 
-			const aiConfig = this.configurationService.getValue('aiCompanion.ai');
-			
-			if (aiConfig && typeof aiConfig === 'object') {
-				const config = aiConfig as any;
-				if (config.provider && config.apiKey) {
-					this.logService.info('AI provider configured:', config.provider);
-					// For now, just log that it's configured - remove the actual provider initialization
-					// that's causing the error
-				} else {
-					this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
-				}
-			} else {
-				this.logService.warn('AI provider not configured. Add settings to aiCompanion.ai');
-			}
-			
-			// Set aiProvider to undefined for now to avoid initialization errors
+			// For now, just set aiProvider to undefined to avoid initialization errors
+			// We'll handle the actual AI calls in the AIChatView
 			this.aiProvider = undefined;
+			this.logService.info('AI provider initialization skipped - using direct calls');
+
 		} catch (error: unknown) {
 			// Completely safe error handling
 			let errorMessage = 'Unknown error';
@@ -368,9 +366,7 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 		try {
 			const conversationFile = `${AICompanionFiles.CONVERSATION_BACKUP}.${id}.json`;
-			if (await this.fileSystemManager.fileExists(conversationFile)) {
-				await this.fileSystemManager.deleteFile(conversationFile);
-			}
+			await this.workspaceEditService.deleteFile(conversationFile);
 		} catch (error: unknown) {
 			// Safe error handling
 			let errorMessage = 'Unknown error';
@@ -683,14 +679,23 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 	}
 
 	async generateCode(tasks: IAITask[], selectedTasks?: string[]): Promise<void> {
+		console.log('🔍 DEBUG AICompanionService.generateCode called with:', {
+			taskCount: tasks.length,
+			selectedTasks,
+			tasks: tasks.map(t => ({ id: t.id, title: t.title, filePath: t.filePath }))
+		});
+
 		this.ensureInitialized();
 		this.setState(ConversationState.GeneratingCode);
+
+		const progressHandle = this.aiNotificationService.showAIGenerating('code');
 
 		try {
 			if (!this.aiProvider) {
 				throw new Error('AI provider not configured');
 			}
 
+			console.log('🔍 DEBUG AI provider found, generating project context...');
 			const projectContext = await this.generateProjectContext();
 			
 			const aiTasks = {
@@ -705,16 +710,28 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				reasoning: ''
 			};
 
+			console.log('🔍 DEBUG Calling AI provider.generateCode...');
 			const aiResult = await this.aiProvider.generateCode(aiTasks, selectedTasks, projectContext);
 
-			for (const file of aiResult.files) {
-				await this.fileSystemManager.writeFile(file.path, file.content, {
-					createBackup: true,
-					verifyWrite: true
-				});
-				
-				this.logService.info(`Generated file: ${file.path}`);
-			}
+			console.log('🔍 DEBUG AI provider returned result:', {
+				fileCount: aiResult.files.length,
+				files: aiResult.files.map(f => ({ path: f.path, hasContent: !!f.content }))
+			});
+
+			// Use WorkspaceEditService for atomic file operations with undo/redo support
+			const fileEdits = aiResult.files.map(file => ({
+				type: 'create' as const,
+				path: file.path,
+				content: file.content,
+				options: { overwrite: true }
+			}));
+
+			console.log('🔍 DEBUG About to call workspaceEditService.applyEdits...');
+			await this.workspaceEditService.applyEdits(fileEdits);
+			console.log('✅ WorkspaceEditService.applyEdits completed successfully');
+			
+			progressHandle.close();
+			this.aiNotificationService.showAICodeGenerated(aiResult.files.length);
 
 			if (this._currentConversation) {
 				const aiMessage: IAIMessage = {
@@ -733,8 +750,14 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			this.setState(ConversationState.Idle);
 
 		} catch (error: any) {
+			console.error('❌ AICompanionService.generateCode failed:', error);
+			progressHandle.close();
 			this.setState(ConversationState.Idle);
-			this.logService.error('Failed to generate code:', error);
+			this.aiNotificationService.showError({
+				title: 'Code Generation Failed',
+				message: 'Failed to generate code from tasks',
+				error: error as Error
+			});
 			throw error;
 		}
 	}
@@ -836,7 +859,7 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		this.ensureInitialized();
 		
 		try {
-			await this.fileSystemManager.deleteFile(AICompanionFiles.PROJECT_MEMORY);
+			await this.workspaceEditService.deleteFile(AICompanionFiles.PROJECT_MEMORY);
 		} catch (error: unknown) {
 			// Ignore errors when clearing project memory
 		}
@@ -906,8 +929,8 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			content += '\n';
 		}
 
-		await this.fileSystemManager.writeFile(AICompanionFiles.TASKS_FILE, content);
-		return URI.file(this.fileSystemManager.resolveProjectPath(AICompanionFiles.TASKS_FILE));
+		await this.workspaceEditService.writeFile(AICompanionFiles.TASKS_FILE, content);
+		return URI.file(this.pathUtils.resolveProjectPath(AICompanionFiles.TASKS_FILE));
 	}
 
 	isWorkspaceCompatible(): boolean {
@@ -932,6 +955,96 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			files: [],
 			gitBranch: undefined
 		};
+	}
+
+	// New methods that utilize CodeSearchService
+
+	/**
+	 * Search for code in the workspace
+	 */
+	async searchCode(query: string, options?: any): Promise<any> {
+		this.ensureInitialized();
+		
+		try {
+			const results = await this.codeSearchService.searchText(query, options);
+			this.aiNotificationService.showAISearchComplete(results.length);
+			return results;
+		} catch (error) {
+			this.aiNotificationService.showError({
+				title: 'Search Failed',
+				message: `Failed to search code for "${query}"`,
+				error: error as Error
+			});
+			throw error;
+		}
+	}
+
+	/**
+	 * Find references to a symbol
+	 */
+	async findCodeReferences(symbol: string): Promise<any> {
+		this.ensureInitialized();
+		
+		try {
+			const results = await this.codeSearchService.findReferences(symbol);
+			this.logService.info(`AI Companion: Found ${results.length} references to "${symbol}"`);
+			return results;
+		} catch (error) {
+			this.logService.error(`AI Companion: Failed to find references for "${symbol}"`, error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Find definitions of a symbol
+	 */
+	async findCodeDefinitions(symbol: string): Promise<any> {
+		this.ensureInitialized();
+		
+		try {
+			const results = await this.codeSearchService.findDefinitions(symbol);
+			this.logService.info(`AI Companion: Found ${results.length} definitions for "${symbol}"`);
+			return results;
+		} catch (error) {
+			this.logService.error(`AI Companion: Failed to find definitions for "${symbol}"`, error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Analyze the codebase structure
+	 */
+	async analyzeCodebase(): Promise<any> {
+		this.ensureInitialized();
+		
+		try {
+			const analysis = await this.codeSearchService.analyzeCodebase();
+			const insights = `${analysis.totalFiles} files, ${Object.keys(analysis.languages).length} languages, ${analysis.frameworks.join(', ') || 'no frameworks'} detected`;
+			this.aiNotificationService.showAIAnalysisComplete(insights);
+			return analysis;
+		} catch (error) {
+			this.aiNotificationService.showError({
+				title: 'Analysis Failed',
+				message: 'Failed to analyze codebase',
+				error: error as Error
+			});
+			throw error;
+		}
+	}
+
+	/**
+	 * Get context around a specific line in a file
+	 */
+	async getCodeContext(filePath: string, lineNumber: number, contextLines?: number): Promise<string> {
+		this.ensureInitialized();
+		
+		try {
+			const context = await this.codeSearchService.getContext(filePath, lineNumber, contextLines);
+			return context;
+		} catch (error) {
+			this.logService.error(`AI Companion: Failed to get context for ${filePath}:${lineNumber}`, error);
+			return `Error getting context: ${error}`;
+		}
 	}
 
 	private ensureInitialized(): void {

@@ -1,6 +1,9 @@
 import { generateUuid } from '../../../../../base/common/uuid.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { ICodeSearchService } from '../../common/codeSearchService.js';
+import { IAINotificationService } from '../../common/aiNotificationService.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
 import { MockAIService } from './mockAiService.js';
 import { IBackendCommunicationService, BackendAIResponse } from './backendCommunicationService.js';
 
@@ -11,9 +14,17 @@ export class MockBackendCommunicationService implements IBackendCommunicationSer
 
 	constructor(
 		private readonly _workspaceService: IWorkspaceContextService,
-		private readonly _configurationService: IConfigurationService
+		private readonly _configurationService: IConfigurationService,
+		private readonly _codeSearchService?: ICodeSearchService,
+		private readonly _aiNotificationService?: IAINotificationService,
+		private readonly _logService?: ILogService
 	) {
-		this.mockAI = new MockAIService();
+		this.mockAI = new MockAIService(
+			undefined, // sessionId
+			this._codeSearchService,
+			this._aiNotificationService,
+			this._logService
+		);
 		this.sessionId = generateUuid();
 		this.isConnected = true;
 		console.log('🎭 Mock Backend Service initialized with session:', this.sessionId);

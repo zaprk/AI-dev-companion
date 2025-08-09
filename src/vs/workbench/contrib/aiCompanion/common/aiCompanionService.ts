@@ -54,15 +54,64 @@ export interface IAIConversation {
 	lastModified: number;
 }
 
+// IProjectMemory is now imported from projectMemoryService.ts
 export interface IProjectMemory {
-	projectName: string;
-	goals: string[];
-	stack: string[];
-	architecture: string;
-	features: string[];
-	userPreferences: Record<string, any>;
-	conversations: string[];
-	lastUpdated: number;
+	version: string;
+	lastUpdated: string;
+	lastAnalyzed: string;
+	project: {
+		name: string;
+		type: string;
+		framework: Record<string, string>;
+		languages: string[];
+		packageManager?: 'npm' | 'yarn' | 'pnpm';
+	};
+	architecture: {
+		pattern: string;
+		folderStructure: Record<string, any>;
+		layering: string[];
+		designPatterns: string[];
+	};
+	conventions: {
+		fileNaming: 'camelCase' | 'PascalCase' | 'kebab-case' | 'snake_case';
+		componentNaming: 'camelCase' | 'PascalCase';
+		functionNaming: 'camelCase' | 'PascalCase';
+		variableNaming: 'camelCase' | 'snake_case';
+		indentation: '2-spaces' | '4-spaces' | 'tabs';
+		quotes: 'single' | 'double';
+		semicolons: boolean;
+		trailingCommas: boolean;
+	};
+	patterns: {
+		componentStructure: string;
+		stateManagement: string;
+		styling: string;
+		apiPattern: string;
+		errorHandling: string;
+		testingApproach: string;
+	};
+	dependencies: {
+		commonImports: string[];
+		frequentlyUsed: string[];
+		coreLibraries: string[];
+		devDependencies: string[];
+	};
+	codebase: {
+		totalFiles: number;
+		fileTypes: Record<string, number>;
+		linesOfCode: number;
+		complexity: 'low' | 'medium' | 'high';
+		maintainability: 'low' | 'medium' | 'high';
+	};
+	intelligence: {
+		generatedFiles: number;
+		userCorrections: number;
+		preferredPatterns: string[];
+		learningConfidence: number;
+		successfulGenerations: number;
+		failedGenerations: number;
+	};
+	fileRelationships: Record<string, any>;
 }
 
 export interface IAITask {
@@ -121,15 +170,24 @@ export interface IAICompanionService {
 	generateTasks(requirements: IAIRequirements, design: IAIDesign): Promise<IAITask[]>;
 	generateCode(tasks: IAITask[], selectedTasks?: string[]): Promise<void>;
 
+	// Workflow context management
+	clearWorkflowContext(): void;
+	getStoredRequirements(): IAIRequirements | undefined;
+	getStoredDesign(): IAIDesign | undefined;
+	getStoredTasks(): IAITask[] | undefined;
+
 	getTasks(conversationId?: string): Promise<IAITask[]>;
 	updateTask(taskId: string, updates: Partial<IAITask>): Promise<void>;
 	completeTask(taskId: string): Promise<void>;
 	deleteTask(taskId: string): Promise<void>;
 
-	loadProjectMemory(workspaceUri: URI): Promise<IProjectMemory | undefined>;
+	loadProjectMemory(): Promise<IProjectMemory | undefined>;
 	saveProjectMemory(memory: IProjectMemory): Promise<void>;
 	updateProjectMemory(updates: Partial<IProjectMemory>): Promise<void>;
 	clearProjectMemory(): Promise<void>;
+
+	analyzeCodebase(): Promise<IProjectMemory>;
+	getProjectMemoryContext(): string;
 
 	setMode(mode: AICompanionMode): Promise<void>;
 	getMode(): AICompanionMode;

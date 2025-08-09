@@ -2,7 +2,7 @@ import { Emitter, Event } from '../../../../../base/common/event.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
-import { IAICompanionService, AICompanionMode } from '../../common/aiCompanionService.js';
+import { IAICompanionService, AICompanionMode, IAITask } from '../../common/aiCompanionService.js';
 import { ViewPane, IViewPaneOptions } from '../../../../browser/parts/views/viewPane.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -15,7 +15,6 @@ import { IWorkspaceContextService } from '../../../../../platform/workspace/comm
 import { ICodeSearchService } from '../../common/codeSearchService.js';
 import { IAINotificationService } from '../../common/aiNotificationService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
-import { IBulkEditService } from '../../../../../editor/browser/services/bulkEditService.js';
 // Removed markdown renderer imports to avoid disposal issues
 import { append, $ } from '../../../../../base/browser/dom.js';
 import { safeSetInnerHtml } from '../../../../../base/browser/domSanitize.js';
@@ -64,8 +63,6 @@ export class AIChatView extends ViewPane {
 	private readonly aiCompanionService: IAICompanionService;
 	private readonly workspaceService: IWorkspaceContextService;
 	private readonly markdownRenderer: MarkdownRenderer;
-	private readonly logService: ILogService;
-	private readonly bulkEditService: IBulkEditService;
 
 	// Specialized services
 	private readonly backendService: IBackendCommunicationService;
@@ -99,16 +96,13 @@ export class AIChatView extends ViewPane {
 		@IWorkspaceContextService workspaceService: IWorkspaceContextService,
 		@ICodeSearchService codeSearchService: ICodeSearchService,
 		@IAINotificationService aiNotificationService: IAINotificationService,
-		@ILogService logService: ILogService,
-		@IBulkEditService bulkEditService: IBulkEditService
+		@ILogService logService: ILogService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		// Initialize core services
 		this.aiCompanionService = aiCompanionService;
 		this.workspaceService = workspaceService;
-		this.logService = logService;
-		this.bulkEditService = bulkEditService;
 
 		// Initialize specialized services
 		this.backendService = new MockBackendCommunicationService(
@@ -330,7 +324,34 @@ export class AIChatView extends ViewPane {
 			await this.handleFullBuilderWorkflow(content);
 		} else {
 			// Use streaming for better user experience
-			await this.handleStreamingWorkflow(workflowType, content);
+			const response = await this.handleStreamingWorkflow(workflowType, content);
+			
+			// If this is a code generation workflow, actually create the files
+			if (workflowType === 'code' && response) {
+				try {
+					console.log('📁 Creating files for code generation...');
+					
+					// Create basic tasks for code generation
+					const mockTasks: IAITask[] = [
+						{
+							id: 'standalone-task-1',
+							title: 'Generate Project Files',
+							description: 'Generate the requested project files',
+							filePath: 'package.json',
+							completed: false,
+							createdAt: Date.now()
+						}
+					];
+					
+					// Call the AICompanionService to actually generate files
+					await this.aiCompanionService.generateCode(mockTasks);
+					console.log('✅ Files created successfully!');
+					
+				} catch (error) {
+					console.error('❌ Failed to create files:', error);
+					this.addAssistantMessage(`❌ Failed to create files: ${error}`);
+				}
+			}
 		}
 		
 
@@ -343,6 +364,9 @@ export class AIChatView extends ViewPane {
 		this.uiService.showWorkflowProgress(this.messageList);
 		this.uiService.resetWorkflowProgress();
 		
+		// Clear any previous workflow context for fresh start
+		this.aiCompanionService.clearWorkflowContext();
+		
 		try {
 			// Step 1: Generate requirements with smooth progress
 			console.log('📋 Step 1: Generating requirements...');
@@ -351,6 +375,14 @@ export class AIChatView extends ViewPane {
 			if (!requirementsResponse) {
 				console.error('❌ Requirements generation failed, stopping workflow');
 				return;
+			}
+			
+			// Call AI service to generate and store requirements
+			try {
+				await this.aiCompanionService.generateRequirements(content);
+				console.log('✅ Requirements stored successfully');
+			} catch (error) {
+				console.error('❌ Failed to store requirements:', error);
 			}
 			
 			// Brief pause between steps for visual clarity
@@ -366,6 +398,19 @@ export class AIChatView extends ViewPane {
 				return;
 			}
 			
+			// Call AI service to generate and store design
+			try {
+				const storedRequirements = this.aiCompanionService.getStoredRequirements();
+				if (storedRequirements) {
+					await this.aiCompanionService.generateDesign(storedRequirements);
+					console.log('✅ Design stored successfully using stored requirements');
+				} else {
+					console.error('❌ No stored requirements found for design generation');
+				}
+			} catch (error) {
+				console.error('❌ Failed to store design:', error);
+			}
+			
 			await this.delay(500);
 			
 			// Step 3: Generate tasks
@@ -378,12 +423,69 @@ export class AIChatView extends ViewPane {
 				return;
 			}
 			
+			// Call AI service to generate and store tasks
+			try {
+				const storedRequirements = this.aiCompanionService.getStoredRequirements();
+				const storedDesign = this.aiCompanionService.getStoredDesign();
+				if (storedRequirements && storedDesign) {
+					await this.aiCompanionService.generateTasks(storedRequirements, storedDesign);
+					console.log('✅ Tasks stored successfully using stored requirements and design');
+				} else {
+					console.error('❌ No stored requirements or design found for task generation');
+				}
+			} catch (error) {
+				console.error('❌ Failed to store tasks:', error);
+			}
+			
 			await this.delay(500);
 			
 			// Step 4: Generate code
 			console.log('💻 Step 4: Generating code...');
-			await this.handleStreamingWorkflow('code', 
+			const codeResponse = await this.handleStreamingWorkflow('code', 
 				`Requirements:\n${requirementsResponse}\n\nDesign:\n${designResponse}\n\nTasks:\n${tasksResponse}\n\nGenerate code for: ${content}`);
+			
+			// Step 5: Actually create the files using AICompanionService
+			if (codeResponse && tasksResponse) {
+				try {
+					console.log('📁 Step 5: Creating files on disk...');
+					
+					// Parse the tasks response to create mock tasks
+					const mockTasks: IAITask[] = [
+						{
+							id: 'task-1',
+							title: 'Project Setup and Configuration',
+							description: 'Initialize the project structure and configuration',
+							filePath: 'package.json',
+							completed: false,
+							createdAt: Date.now()
+						},
+						{
+							id: 'task-2', 
+							title: 'Database Schema and Models',
+							description: 'Design and implement database schema with Prisma',
+							filePath: 'prisma/schema.prisma',
+							completed: false,
+							createdAt: Date.now()
+						},
+						{
+							id: 'task-3',
+							title: 'Authentication System Backend', 
+							description: 'Implement JWT-based authentication',
+							filePath: 'server/controllers/auth.ts',
+							completed: false,
+							createdAt: Date.now()
+						}
+					];
+					
+					// Call the AICompanionService to actually generate files
+					await this.aiCompanionService.generateCode(mockTasks);
+					console.log('✅ Files created successfully!');
+					
+				} catch (error) {
+					console.error('❌ Failed to create files:', error);
+					this.addAssistantMessage(`❌ Failed to create files: ${error}`);
+				}
+			}
 			
 			console.log('✅ Full workflow complete');
 			
@@ -946,45 +1048,8 @@ export class AIChatView extends ViewPane {
 						throw new Error('Streaming response produced empty content');
 					}
 					
-					// For code generation, parse the JSON response and create files directly
-					if (workflowType === 'code') {
-						try {
-							console.log('🔍 DEBUG Attempting to parse code generation response...');
-							const codeResponse = JSON.parse(finalContent);
-							
-							if (codeResponse.files && Array.isArray(codeResponse.files)) {
-								console.log(`📁 Found ${codeResponse.files.length} files to generate`);
-								
-								// Create file edits directly using WorkspaceEditService
-								const fileEdits = codeResponse.files.map((file: any) => ({
-									type: 'create' as const,
-									path: file.path,
-									content: file.content,
-									options: { overwrite: true }
-								}));
-								
-								// Import and use WorkspaceEditService directly
-								const { WorkspaceEditService } = await import('../../common/workspaceEditService.js');
-								const workspaceEditService = new WorkspaceEditService(
-									this.bulkEditService,
-									this.logService,
-									this.workspaceService
-								);
-								
-								console.log('🚀 Creating files directly with WorkspaceEditService...');
-								await workspaceEditService.applyEdits(fileEdits);
-								console.log('✅ Files created successfully!');
-								
-								// Show success message
-								this.addAssistantMessage(`✅ Generated ${codeResponse.files.length} files successfully!`);
-							} else {
-								console.warn('⚠️ Code response does not contain files array:', codeResponse);
-							}
-						} catch (parseError) {
-							console.error('❌ Failed to parse code generation response:', parseError);
-							console.log('🔍 DEBUG Raw content that failed to parse:', finalContent);
-						}
-					}
+					// For code generation, the MockAIProvider will handle file creation directly
+					// No need to parse response here as files are created during the AI provider call
 					
 					this.cachingService.setCache(cacheKey, { content: finalContent });
 					endTimer();

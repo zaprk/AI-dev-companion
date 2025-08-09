@@ -10,6 +10,13 @@ import { IConfigurationService } from '../../../../platform/configuration/common
 import { IWorkspaceEditService } from './workspaceEditService.js';
 import { ICodeSearchService } from './codeSearchService.js';
 import { IAINotificationService } from './aiNotificationService.js';
+import { ICodeValidationService } from './codeValidationService.js';
+import { IProjectMemoryService, IProjectMemory } from './projectMemoryService.js';
+import { ICodebaseAnalyzer } from './codebaseAnalyzer.js';
+import { IIntelligentCodeGenerator } from './intelligentCodeGenerator.js';
+import { IFeedbackLearningService } from './feedbackLearningService.js';
+import { IPromptSecurityService } from './promptSecurityService.js';
+import { ICostOptimizationService } from './costOptimizationService.js';
 
 import {
 	IAICompanionService,
@@ -18,7 +25,6 @@ import {
 	IAITask,
 	IAIRequirements,
 	IAIDesign,
-	IProjectMemory,
 	AICompanionMode,
 	ConversationState,
 	MessageType
@@ -37,20 +43,7 @@ import {
 	ErrorUtils 
 } from '../browser/utils/index.js';
 
-const PROJECT_MEMORY_SCHEMA = {
-	type: 'object',
-	properties: {
-		projectName: { type: 'string' },
-		goals: { type: 'array' },
-		stack: { type: 'array' },
-		architecture: { type: 'string' },
-		features: { type: 'array' },
-		userPreferences: { type: 'object' },
-		conversations: { type: 'array' },
-		lastUpdated: { type: 'number' }
-	},
-	required: ['projectName', 'goals', 'stack', 'lastUpdated']
-};
+// PROJECT_MEMORY_SCHEMA no longer needed - using ProjectMemoryService
 
 const CONVERSATION_SCHEMA = {
 	type: 'object',
@@ -88,6 +81,13 @@ export class AICompanionService extends Disposable implements IAICompanionServic
     private readonly workspaceEditService: IWorkspaceEditService;
     private readonly codeSearchService: ICodeSearchService;
     private readonly aiNotificationService: IAINotificationService;
+    private readonly codeValidationService: ICodeValidationService;
+    private readonly projectMemoryService: IProjectMemoryService;
+    private readonly codebaseAnalyzer: ICodebaseAnalyzer;
+    private readonly intelligentCodeGenerator: IIntelligentCodeGenerator;
+    private readonly feedbackLearningService: IFeedbackLearningService;
+    private readonly promptSecurityService: IPromptSecurityService;
+    private readonly costOptimizationService: ICostOptimizationService;
 
 	private readonly fileSystemManager: FileSystemManager;
 	private readonly pathUtils: PathUtils;
@@ -103,6 +103,14 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 	private conversations: Map<string, IAIConversation> = new Map();
 	private tasks: Map<string, IAITask[]> = new Map();
 
+	// Workflow memory to pass context between steps
+	private workflowContext: {
+		requirements?: IAIRequirements;
+		design?: IAIDesign;
+		tasks?: IAITask[];
+		conversationId?: string;
+	} = {};
+
 	private aiProvider: IAIProvider | undefined;
 
 	    constructor(
@@ -113,7 +121,14 @@ export class AICompanionService extends Disposable implements IAICompanionServic
         @IConfigurationService configurationService: IConfigurationService,
         @IWorkspaceEditService workspaceEditService: IWorkspaceEditService,
         @ICodeSearchService codeSearchService: ICodeSearchService,
-        @IAINotificationService aiNotificationService: IAINotificationService
+        @IAINotificationService aiNotificationService: IAINotificationService,
+        @ICodeValidationService codeValidationService: ICodeValidationService,
+        @IProjectMemoryService projectMemoryService: IProjectMemoryService,
+        @ICodebaseAnalyzer codebaseAnalyzer: ICodebaseAnalyzer,
+        @IIntelligentCodeGenerator intelligentCodeGenerator: IIntelligentCodeGenerator,
+        @IFeedbackLearningService feedbackLearningService: IFeedbackLearningService,
+        @IPromptSecurityService promptSecurityService: IPromptSecurityService,
+        @ICostOptimizationService costOptimizationService: ICostOptimizationService
     ) {
 		super();
 
@@ -146,6 +161,13 @@ export class AICompanionService extends Disposable implements IAICompanionServic
         this.workspaceEditService = workspaceEditService;
         this.codeSearchService = codeSearchService;
         this.aiNotificationService = aiNotificationService;
+        this.codeValidationService = codeValidationService;
+        this.projectMemoryService = projectMemoryService;
+        this.codebaseAnalyzer = codebaseAnalyzer;
+        this.intelligentCodeGenerator = intelligentCodeGenerator;
+        this.feedbackLearningService = feedbackLearningService;
+        this.promptSecurityService = promptSecurityService;
+        this.costOptimizationService = costOptimizationService;
 
 		this.fileSystemManager = new FileSystemManager(
 			workspaceService,
@@ -177,10 +199,32 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				return;
 			}
 
-			// For now, just set aiProvider to undefined to avoid initialization errors
-			// We'll handle the actual AI calls in the AIChatView
-			this.aiProvider = undefined;
-			this.logService.info('AI provider initialization skipped - using direct calls');
+			// Initialize MockAIProvider
+			const mockConfig = {
+				provider: 'local' as const,
+				model: 'mock-model',
+				maxTokens: 4000,
+				temperature: 0.7,
+				timeout: 30000
+			};
+
+			// Import and create MockAIProvider
+			import('./ai/providers/mockAiProvider.js').then(({ MockAIProvider }) => {
+				                    this.aiProvider = new MockAIProvider(
+                        mockConfig,
+                        this.workspaceEditService,
+                        this.codeValidationService,
+                        this.intelligentCodeGenerator,
+                        this.feedbackLearningService,
+                        this.promptSecurityService,
+                        this.costOptimizationService,
+                        this.logService
+                    );
+				this.logService.info('✅ MockAIProvider initialized with intelligent services');
+			}).catch((error) => {
+				this.logService.error('❌ Failed to initialize MockAIProvider:', error);
+				this.aiProvider = undefined;
+			});
 
 		} catch (error: unknown) {
 			// Completely safe error handling
@@ -206,16 +250,35 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 	private async generateProjectContext(): Promise<any> {
 		const workspaceInfo = await this.getWorkspaceInfo();
-		const projectMemory = this._projectMemory;
+		
+		// Load project memory if not already loaded
+		if (!this._projectMemory) {
+			await this.loadProjectMemory();
+		}
+		
+		// If still no memory, analyze the codebase to create it
+		if (!this._projectMemory) {
+			this.logService.info('🔍 No project memory found, analyzing codebase...');
+			try {
+				await this.analyzeCodebase();
+			} catch (error) {
+				this.logService.warn('⚠️ Failed to analyze codebase, using default context:', error);
+			}
+		}
+		
+		// Get intelligent project context from memory
+		const intelligentContext = this.getProjectMemoryContext();
 		
 		return {
 			workspace: workspaceInfo,
-			projectMemory: projectMemory,
+			projectMemory: this._projectMemory,
+			intelligentContext: intelligentContext,
 			currentMode: this._currentMode,
 			fileStructure: await this.getFileStructure(),
-			techStack: projectMemory?.stack || [],
-			architecture: projectMemory?.architecture || '',
-			goals: projectMemory?.goals || []
+			techStack: this._projectMemory?.project.framework || {},
+			architecture: this._projectMemory?.architecture.pattern || '',
+			conventions: this._projectMemory?.conventions || {},
+			patterns: this._projectMemory?.patterns || {}
 		};
 	}
 
@@ -281,7 +344,7 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 
 			await this.fileSystemManager.initialize();
 
-			await this.loadProjectMemory(workspaceUri);
+			await this.loadProjectMemory();
 
 			await this.loadExistingConversations();
 
@@ -511,6 +574,11 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				assumptions: aiResult.assumptions
 			};
 
+			// Store requirements in workflow context for next steps
+			this.workflowContext.requirements = requirements;
+			this.workflowContext.conversationId = this._currentConversation?.id;
+			console.log('✅ Stored requirements in workflow context for next steps');
+
 			if (this._currentConversation) {
 				const aiMessage: IAIMessage = {
 					id: generateUuid(),
@@ -589,6 +657,10 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				dependencies: aiResult.dependencies
 			};
 
+			// Store design in workflow context for next steps
+			this.workflowContext.design = design;
+			console.log('✅ Stored design in workflow context for next steps');
+
 			if (this._currentConversation) {
 				const aiMessage: IAIMessage = {
 					id: generateUuid(),
@@ -652,6 +724,10 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 				createdAt: Date.now()
 			}));
 
+			// Store tasks in workflow context for next steps
+			this.workflowContext.tasks = tasks;
+			console.log('✅ Stored tasks in workflow context for next steps');
+
 			if (this._currentConversation) {
 				this.tasks.set(this._currentConversation.id, tasks);
 				
@@ -678,6 +754,140 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		}
 	}
 
+	/**
+	 * Clear workflow context for new workflow
+	 */
+	clearWorkflowContext(): void {
+		this.workflowContext = {};
+		console.log('🔄 Cleared workflow context for new workflow');
+	}
+
+	/**
+	 * Get stored requirements from workflow context
+	 */
+	getStoredRequirements(): IAIRequirements | undefined {
+		return this.workflowContext.requirements;
+	}
+
+	/**
+	 * Get stored design from workflow context
+	 */
+	getStoredDesign(): IAIDesign | undefined {
+		return this.workflowContext.design;
+	}
+
+	/**
+	 * Get stored tasks from workflow context
+	 */
+	getStoredTasks(): IAITask[] | undefined {
+		return this.workflowContext.tasks;
+	}
+
+	/**
+	 * Analyze the codebase and update project memory
+	 */
+	async analyzeCodebase(): Promise<IProjectMemory> {
+		this.logService.info('🔍 Starting codebase analysis...');
+		
+		try {
+			const memory = await this.codebaseAnalyzer.analyzeCodebase();
+			await this.projectMemoryService.saveMemory(memory);
+			
+			this._projectMemory = memory;
+			this._onDidUpdateProjectMemory.fire(memory);
+			
+			this.logService.info(`✅ Codebase analysis complete (${memory.codebase.totalFiles} files, confidence: ${Math.round(memory.intelligence.learningConfidence * 100)}%)`);
+			return memory;
+			
+		} catch (error) {
+			this.logService.error('❌ Codebase analysis failed:', error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Load existing project memory
+	 */
+	async loadProjectMemory(): Promise<IProjectMemory | undefined> {
+		try {
+			const memory = await this.projectMemoryService.loadMemory();
+			if (memory) {
+				this._projectMemory = memory;
+				this._onDidUpdateProjectMemory.fire(memory);
+				this.logService.info(`📄 Loaded project memory (${memory.codebase.totalFiles} files analyzed)`);
+			}
+			return memory;
+		} catch (error) {
+			this.logService.error('❌ Failed to load project memory:', error);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Get current project memory with intelligent context
+	 */
+	getProjectMemoryContext(): string {
+		if (!this._projectMemory) {
+			return 'No project memory available. This appears to be a new or unanalyzed project.';
+		}
+
+		const memory = this._projectMemory;
+		
+		return `
+CURRENT PROJECT CONTEXT:
+Project: ${memory.project.name} (${memory.project.type})
+Framework: ${Object.entries(memory.project.framework).map(([key, value]) => `${key}: ${value}`).join(', ')}
+Languages: ${memory.project.languages.join(', ')}
+
+CODING CONVENTIONS:
+- File naming: ${memory.conventions.fileNaming}
+- Component naming: ${memory.conventions.componentNaming}
+- Indentation: ${memory.conventions.indentation}
+- Quotes: ${memory.conventions.quotes}
+- Semicolons: ${memory.conventions.semicolons ? 'required' : 'optional'}
+
+ARCHITECTURE PATTERNS:
+- Pattern: ${memory.patterns.componentStructure}
+- State Management: ${memory.patterns.stateManagement}
+- Styling: ${memory.patterns.styling}
+- API Pattern: ${memory.patterns.apiPattern}
+
+COMMON IMPORTS:
+${memory.dependencies.commonImports.join('\n')}
+
+CODEBASE STATS:
+- Files: ${memory.codebase.totalFiles}
+- Lines of Code: ${memory.codebase.linesOfCode}
+- Complexity: ${memory.codebase.complexity}
+- Learning Confidence: ${Math.round(memory.intelligence.learningConfidence * 100)}%
+
+FOLDER STRUCTURE:
+${Object.keys(memory.architecture.folderStructure).join(', ')}
+
+Please generate code that follows these existing patterns and conventions.
+		`.trim();
+	}
+
+	async saveProjectMemory(memory: IProjectMemory): Promise<void> {
+		await this.projectMemoryService.saveMemory(memory);
+		this._projectMemory = memory;
+		this._onDidUpdateProjectMemory.fire(memory);
+	}
+
+	async updateProjectMemory(updates: Partial<IProjectMemory>): Promise<void> {
+		await this.projectMemoryService.updateMemory(updates);
+		// Reload the updated memory
+		this._projectMemory = await this.projectMemoryService.loadMemory();
+		if (this._projectMemory) {
+			this._onDidUpdateProjectMemory.fire(this._projectMemory);
+		}
+	}
+
+	async clearProjectMemory(): Promise<void> {
+		await this.projectMemoryService.clearMemory();
+		this._projectMemory = undefined;
+	}
+
 	async generateCode(tasks: IAITask[], selectedTasks?: string[]): Promise<void> {
 		console.log('🔍 DEBUG AICompanionService.generateCode called with:', {
 			taskCount: tasks.length,
@@ -698,8 +908,13 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			console.log('🔍 DEBUG AI provider found, generating project context...');
 			const projectContext = await this.generateProjectContext();
 			
+			// Use workflow context tasks if available, otherwise fall back to passed tasks
+			const tasksToUse = this.workflowContext.tasks || tasks;
+			console.log('🔍 DEBUG Using tasks from:', this.workflowContext.tasks ? 'workflow context' : 'parameters', 
+				'(', tasksToUse.length, 'tasks)');
+			
 			const aiTasks = {
-				tasks: tasks.map(task => ({
+				tasks: tasksToUse.map(task => ({
 					title: task.title,
 					description: task.description,
 					filePath: task.filePath,
@@ -729,6 +944,16 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 			console.log('🔍 DEBUG About to call workspaceEditService.applyEdits...');
 			await this.workspaceEditService.applyEdits(fileEdits);
 			console.log('✅ WorkspaceEditService.applyEdits completed successfully');
+			
+			// Validate the generated files for syntax errors and issues
+			console.log('🔍 DEBUG Validating generated files...');
+			try {
+				await this.codeValidationService.validateGeneratedFiles(aiResult.files);
+				console.log('✅ Code validation completed successfully');
+			} catch (error) {
+				console.error('❌ Code validation failed:', error);
+				// Don't fail the whole operation if validation fails
+			}
 			
 			progressHandle.close();
 			this.aiNotificationService.showAICodeGenerated(aiResult.files.length);
@@ -800,72 +1025,13 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		this.tasks.set(this._currentConversation.id, filteredTasks);
 	}
 
-	async loadProjectMemory(workspaceUri: URI): Promise<IProjectMemory | undefined> {
-		try {
-			const memory = await this.fileSystemManager.readJsonFile<IProjectMemory>(
-				AICompanionFiles.PROJECT_MEMORY,
-				PROJECT_MEMORY_SCHEMA
-			);
+	// loadProjectMemory method moved above (new implementation)
 
-			this._projectMemory = memory;
-			if (memory) {
-				this._onDidUpdateProjectMemory.fire(memory);
-			}
-			return memory;
+	// saveProjectMemory - using ProjectMemoryService now
 
-		} catch (error: unknown) {
-			this.logService.info('No existing project memory found, starting fresh');
-			return undefined;
-		}
-	}
+	// updateProjectMemory - using ProjectMemoryService now
 
-	async saveProjectMemory(memory: IProjectMemory): Promise<void> {
-		this.ensureInitialized();
-		
-		await this.fileSystemManager.writeJsonFile(
-			AICompanionFiles.PROJECT_MEMORY,
-			memory,
-			PROJECT_MEMORY_SCHEMA
-		);
-
-		this._projectMemory = memory;
-		this._onDidUpdateProjectMemory.fire(memory);
-	}
-
-	async updateProjectMemory(updates: Partial<IProjectMemory>): Promise<void> {
-		this.ensureInitialized();
-
-		const currentMemory = this._projectMemory || {
-			projectName: 'Untitled Project',
-			goals: [],
-			stack: [],
-			architecture: '',
-			features: [],
-			userPreferences: {},
-			conversations: [],
-			lastUpdated: Date.now()
-		};
-
-		const updatedMemory: IProjectMemory = {
-			...currentMemory,
-			...updates,
-			lastUpdated: Date.now()
-		};
-
-		await this.saveProjectMemory(updatedMemory);
-	}
-
-	async clearProjectMemory(): Promise<void> {
-		this.ensureInitialized();
-		
-		try {
-			await this.workspaceEditService.deleteFile(AICompanionFiles.PROJECT_MEMORY);
-		} catch (error: unknown) {
-			// Ignore errors when clearing project memory
-		}
-
-		this._projectMemory = undefined;
-	}
+	// clearProjectMemory method moved above (new implementation)
 
 	async setMode(mode: AICompanionMode): Promise<void> {
 		this.ensureInitialized();
@@ -1011,26 +1177,7 @@ export class AICompanionService extends Disposable implements IAICompanionServic
 		}
 	}
 
-	/**
-	 * Analyze the codebase structure
-	 */
-	async analyzeCodebase(): Promise<any> {
-		this.ensureInitialized();
-		
-		try {
-			const analysis = await this.codeSearchService.analyzeCodebase();
-			const insights = `${analysis.totalFiles} files, ${Object.keys(analysis.languages).length} languages, ${analysis.frameworks.join(', ') || 'no frameworks'} detected`;
-			this.aiNotificationService.showAIAnalysisComplete(insights);
-			return analysis;
-		} catch (error) {
-			this.aiNotificationService.showError({
-				title: 'Analysis Failed',
-				message: 'Failed to analyze codebase',
-				error: error as Error
-			});
-			throw error;
-		}
-	}
+	// analyzeCodebase method moved above (new implementation)
 
 	/**
 	 * Get context around a specific line in a file
